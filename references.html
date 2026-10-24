@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>References · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">READING SAMPLE</div><a class="book-link " href="index.html"><span>00</span>Preface</a><a class="book-link " href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="references.html"><span>↗</span>References</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a><p>Preface + chapter 2<br>Other chapters are in the PDF.</p></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>THE WEB EDITION</span><span>READING SAMPLE</span></div>
+<article><h1 class="likechapterHead" id="references"><a id="x1-22000"></a>References</h1>
+<div class="thebibliography">
+<p class="bibitem"><span class="biblabel">
+  [1]<span class="bibsp">   </span></span><a id="Xdeepinfer-readme"></a>DeepSeek-AI. <em>DeepInfer: release overview</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md</code></a>.
+    Local file: <span class="path"><code>README.md</code></span>. Inspected 20 October 2026.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [2]<span class="bibsp">   </span></span><a id="Xdeepinfer-qa"></a>DeepSeek-AI.     <em>DeepSeek     V4.1     Flash     Inference     Deployment     Q&amp;A</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/inference_deployment_qa.md</code></a>.
+    Inspected 20 October 2026.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [3]<span class="bibsp">   </span></span><a id="Xdeepinfer-engine"></a>DeepSeek-AI. <em>LLM engine</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py</code></a>.
+    YOCO  prompt-logprob  restriction:  lines  528–536.  Engine  methods:  <code>add_request</code>,
+    <code>step</code>,  <span class="path"><code>_execute_model_async_step</code></span> and  <code>post_process</code>.  Lifetime  helper:
+    <code>DeferredRelease</code>,  lines  67–116.  <code>finalize_seq</code>:  lines  804–806;  <code>pre_sampler_sync</code>:
+    lines 830–846; metadata collection in <code>post_process</code>: line 1013.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [4]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler"></a>DeepSeek-AI. <em>C++ scheduler</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp</code></a>.
+    Symbols:  <code>Scheduler::add_sequence</code>,  lines  135–142;  <code>Scheduler::schedule</code>,  lines
+    667–736; <code>Scheduler::_preempt</code>, lines 766–790.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [5]<span class="bibsp">   </span></span><a id="Xdeepinfer-flops"></a>DeepSeek-AI. <em>Main-model FLOPs estimator</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp</code></a>.
+    Symbols:  <code>flops_coef</code>,  <code>FlopsEstimator::calc_flops</code>,  lines  13–45.  Replay  query
+    ranges and cost terms: lines 237–320.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [6]<span class="bibsp">   </span></span><a id="Xdeepinfer-benchmark"></a>DeepSeek-AI. <em>Offline benchmark</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py</code></a>.
+    Symbols:  <code>measure_decode</code>,  <code>run_decode_step</code>;  endpoint  storage,  lines  380–381;
+    measurement and profile windows, lines 499–519; token-accounting comments, lines
+    405, 407 and 539; topology and rank-0 reporting, lines 71–76 and 521–560; YOCO
+    mask-mode option, lines 45–50.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [7]<span class="bibsp">   </span></span><a id="Xdeepinfer-launch"></a>DeepSeek-AI. <em>Data-parallel process launcher</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py</code></a>.
+    Symbols: <code>launch_dp</code>, <code>run_dp</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [8]<span class="bibsp">   </span></span><a id="Xdeepinfer-config"></a>DeepSeek-AI. <em>Example engine configuration</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py</code></a>.
+    Symbol: <code>setup_cuda_visible_devices</code>, lines 55–64. Example chunked-prefill setting
+    and caller overrides: lines 118–123.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [9]<span class="bibsp">   </span></span><a id="Xroofline"></a>Samuel Williams, Andrew Waterman and David Patterson. <em>Roofline: An Insightful
+    Visual Performance Model for Multicore Architectures</em>. Communications of the ACM,
+    52(4), 2009, pp. 65–76. <a class="url" href="https://doi.org/10.1145/1498765.1498785"><code>https://doi.org/10.1145/1498765.1498785</code></a>.
+</p>
+</div>
+</article><nav class="page-turn" aria-label="Sample pages"><a href="index.html"><small>PREVIOUS IN THIS SAMPLE</small>← Preface</a><a class="next" href="book.pdf"><small>CONTINUE READING</small>The complete book ↗</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="COPYRIGHT.txt">Copyright and permissions</a> · Generated from the book’s LaTeX sources.</footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

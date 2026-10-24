@@ -1,0 +1,34 @@
+Inside DeepInfer: How an LLM Inference Engine Works
+Copyright (c) 2026 Jianxin Zhao.
+
+Book text and original illustrations
+
+Except where otherwise noted, the book's original text and illustrations,
+including the web and PDF editions, are licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International licence
+(CC BY-NC-SA 4.0):
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+You may share, translate and adapt this material for noncommercial purposes
+under the licence's terms. Credit Jianxin Zhao and the book's title, retain
+the copyright and licence notices, link to the licence and identify changes.
+Shared adaptations must use the same or a compatible licence. The licence does
+not grant permission for commercial use; contact Jianxin Zhao for a separate
+commercial licence.
+
+This is a summary, not a replacement for the licence's legal terms:
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.en
+Exceptions and limitations to copyright, such as quotation, fair use or fair
+dealing, remain unaffected.
+
+Code and third-party material
+
+The CC licence above does not apply to separately licensed code or third-party
+material. DeepInfer source excerpts remain under the Apache License 2.0, with
+their attribution and notices preserved in excerpts/LICENSE and
+excerpts/NOTICE.txt. The companion code is published under Apache-2.0 at:
+https://github.com/jzstark/inside-deepinfer-code
+
+Other third-party material remains subject to its own copyright and any
+applicable licence. Nothing in this notice reduces rights granted by those
+licences or by applicable law.

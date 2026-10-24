@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where the time goes · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">READING SAMPLE</div><a class="book-link " href="index.html"><span>00</span>Preface</a><a class="book-link active" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="references.html"><span>↗</span>References</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a><p>Preface + chapter 2<br>Other chapters are in the PDF.</p></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>THE WEB EDITION</span><span>READING SAMPLE</span></div>
+<article><p class="chapter-number">CHAPTER 02</p><h1 class="chapterHead" id="where-the-time-goes"><a id="x1-60002"></a>Where the time goes</h1>
+<p class="noindent"><a id="ref-ch:cost"></a>
+</p><p class="indent">   Can a slower generation step produce more tokens per second? In chapter 1, each
+simulated round cost one time unit. A real batch does not have a fixed price: more
+requests mean more computation and more data to read. Yet some work can serve
+several requests together. We will follow DeepInfer’s scheduled work into its operation
+estimate, then trace how its benchmark turns observed step returns into a reported token
+rate.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-1">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">If we put four times as many requests in a batch, how much longer can the step take
+before throughput falls? Which delay would an individual reader notice? </p>
+</div>
+</div>
+<p class="indent">   Run the next experiment and compare batches of 16 and 64:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/05_cost.py
+</code></pre></div>
+<p class="indent">   The script calculates costs from hypothetical rates; it does not time Python or a device. For
+now, each request produces one useful output token per step. Here are selected rows from its
+sweep:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Hypothetical model; times in microseconds
+R=N  transfer  compute     step   tokens/s
+  1      41.0      2.0     61.0      16393
+  4      44.0      8.0     64.0      62500
+  8      48.0     16.0     68.0     117647
+ 16      56.0     32.0     76.0     210526
+ 32      72.0     64.0     92.0     347826
+ 40      80.0     80.0    100.0     400000
+ 64     104.0    128.0    148.0     432432
+128     168.0    256.0    276.0     463768
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/05_cost.txt">results/05_cost.txt</a></div></div>
+<p class="indent">   A batch of 16 takes 76 microseconds; a batch of 64 takes 148. Four times as many
+tokens cost less than twice as much time, so the aggregate output rate rises from about
+211,000 to 432,000 tokens per second. But a request that stays in the larger batch waits
+148 microseconds between steps instead of 76. Higher throughput and a longer token
+interval can occur together. The answer to the opening question is therefore: when useful
+output grows fourfold, throughput does not fall provided step time grows by at most
+fourfold.
+</p><p class="indent">   These are two questions about the same work. <em>Throughput </em>counts useful output across
+requests per unit time. <em>Latency </em>measures how long a particular event takes for a request. We need
+a cost model to explain the first result, then a timeline to decide which latency we
+mean.
+</p>
+<h3 class="sectionHead" id="give-each-cost-a-unit"><span class="titlemark">2.1   </span> <a id="x1-70002.1"></a>Give each cost a unit</h3>
+<p class="noindent">Imagine a step that reads a shared array once and also reads some saved state for each request.
+The shared array could contain model parameters: values reused when predicting for different
+users. We assign four million shared bytes, another 100,000 context bytes per request and
+two million arithmetic operations per evaluated position. The model gives the device
+separate limits for memory transfer and arithmetic, plus a fixed cost that runs before
+either.
+</p><p class="indent">   The constants and the complete cost function are small enough to inspect:
+</p><p class="indent"> <a id="ref-lst:cost"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 2.1.</b> A hypothetical cost model with explicit units.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">13</span><span><span class="n">SHARED_BYTES</span> <span class="o">=</span> <span class="mi">4_000_000</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span><span class="n">BYTES_PER_REQUEST</span> <span class="o">=</span> <span class="mi">100_000</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span><span class="n">OPS_PER_POSITION</span> <span class="o">=</span> <span class="mi">2_000_000</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span><span class="n">BANDWIDTH</span> <span class="o">=</span> <span class="mi">100_000_000_000</span>  <span class="c1"># bytes/s; hypothetical</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span><span class="n">COMPUTE_RATE</span> <span class="o">=</span> <span class="mi">1_000_000_000_000</span>  <span class="c1"># operations/s; hypothetical</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span><span class="n">OVERHEAD</span> <span class="o">=</span> <span class="mf">20e-6</span>  <span class="c1"># seconds; serial in this model</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span><span class="k">def</span> <span class="nf">cost</span><span class="p">(</span><span class="n">requests</span><span class="p">,</span> <span class="n">positions</span><span class="p">,</span> <span class="n">context_scale</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">compute_rate</span><span class="o">=</span><span class="n">COMPUTE_RATE</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="n">traffic</span> <span class="o">=</span> <span class="n">SHARED_BYTES</span> <span class="o">+</span> <span class="n">requests</span> <span class="o">*</span> <span class="n">BYTES_PER_REQUEST</span> <span class="o">*</span> <span class="n">context_scale</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>    <span class="n">operations</span> <span class="o">=</span> <span class="n">positions</span> <span class="o">*</span> <span class="n">OPS_PER_POSITION</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>    <span class="n">memory_s</span> <span class="o">=</span> <span class="n">traffic</span> <span class="o">/</span> <span class="n">BANDWIDTH</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>    <span class="n">compute_s</span> <span class="o">=</span> <span class="n">operations</span> <span class="o">/</span> <span class="n">compute_rate</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>    <span class="n">step_s</span> <span class="o">=</span> <span class="n">OVERHEAD</span> <span class="o">+</span> <span class="nb">max</span><span class="p">(</span><span class="n">memory_s</span><span class="p">,</span> <span class="n">compute_s</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>    <span class="k">return</span> <span class="n">memory_s</span><span class="p">,</span> <span class="n">compute_s</span><span class="p">,</span> <span class="n">step_s</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/05_cost.py">labs/05_cost.py</a> · lines 13–27</div></div>
+<p class="indent">   Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math> count
+active requests and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+count positions evaluated in this step. The transferred bytes and operation count are
+                                                                                  
+                                                                                  
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>100</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mi>N</mi><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Ordinary decode evaluates one position per request, so
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>.
+Verification can evaluate several positions for each request: 16 requests with six positions each
+give <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>16</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>96</mn></mrow></math>.
+Those positions use the same saved context. We assume that each request’s
+context is read once and reused across its positions, while arithmetic grows with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>.
+This isolates the benefit of reuse; traffic for new positions and intermediate arrays,
+repeated reads inside kernels and changes in work with context length require a richer
+model.
+</p><p class="indent">   Dividing an amount of work by a rate gives a time. With memory bandwidth
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>11</mn></mrow></msup></mrow></math> bytes per second
+and arithmetic rate <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>12</mn></mrow></msup></mrow></math>
+operations per second, </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>T</mi></mrow><mrow><mstyle mathvariant="normal"><mi>memory</mi></mstyle></mrow></msub><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>W</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><msub><mrow><mi>T</mi></mrow><mrow><mstyle mathvariant="normal"><mi>compute</mi></mstyle></mrow></msub><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>P</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>16</mn></mrow></math>,
+transferring 5.6 million bytes takes 56 microseconds at the assigned rate.
+Performing 32 million operations takes 32 microseconds. A microsecond is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>6</mn></mrow></msup></mrow></math> seconds; a
+millisecond is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>3</mn></mrow></msup></mrow></math>
+seconds. Keeping seconds inside the function makes the final division into tokens per second
+straightforward.
+</p><p class="indent">   If computation and memory transfer overlap perfectly, their combined duration is
+the larger of these two times. The script also assigns a separate serial overhead
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>20</mn></mrow></math>
+                                                                                  
+                                                                                  
+microseconds, so its step model is <a id="ref-eq:step-cost"></a></p><div class="equation-scroll" tabindex="0"><table class="equation"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="label" id="x1-7001r1"></mstyle><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>h</mi> <mo class="MathClass-bin" stretchy="false">+</mo><mtext class="qopname"> max</mtext><mo> ⁡ </mo> <mspace class="negthinspace" width="-0.17em"></mspace> <mrow><mo fence="true" form="prefix"> (</mo><mrow><mfrac><mrow><mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>W</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">,</mo> <mfrac><mrow><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>P</mi></mrow></mfrac> </mrow><mo fence="true" form="postfix">)</mo></mrow><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td><td class="eq-no">(2.1)</td></tr></table></div>
+<p class="indent">   The <code>max </code>explains the 76-microsecond result:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>20</mn> <mo class="MathClass-bin" stretchy="false">+</mo><mtext class="qopname"> max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>56</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>32</mn><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>76</mn></mrow></math>. The
+smaller cost has not disappeared. Under this overlap assumption, it finishes before the larger
+one.
+</p>
+<h4 class="subsectionHead" id="a-bound-is-not-a-stopwatch"><span class="titlemark">2.1.1   </span> <a id="x1-80002.1.1"></a>A bound is not a stopwatch</h4>
+<p class="noindent">If <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> are upper limits on
+achievable rates, then <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>M</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>W</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>F</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>P</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+is a lower bound for the time needed to move those bytes and perform those operations. It becomes
+the script’s predicted duration only because we assume perfect overlap and attainment of both rates.
+Adding <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math>
+also assumes that this overhead cannot overlap with either activity.
+</p><p class="indent">   Actual work can violate those scheduling assumptions. Some operations depend on data that
+has not arrived; small device programs, called <em>kernels</em>, may not reach the assigned rates;
+several stages may each have a different bottleneck. Conversely, host work counted in
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math> may
+overlap with device work. Do not add the maximum of two whole-step totals and expect it to
+describe every dependency inside the step. Chapter 6 will give those dependencies their own
+timeline.
+</p><p class="indent">   The model tells us which assumption to investigate. An arithmetic optimisation
+can leave a transfer-limited step unchanged because arithmetic does not determine its
+duration.
+</p>
+<h3 class="sectionHead" id="find-what-batching-shares"><span class="titlemark">2.2   </span> <a id="x1-90002.2"></a>Find what batching shares</h3>
+<p class="noindent">First keep <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>, as in the
+opening sweep. At small <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>,
+the four-million-byte shared read dominates the memory cost. More requests
+spread that read, and the fixed overhead, across more useful outputs. At larger
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>,
+                                                                                  
+                                                                                  
+the arithmetic cost catches up. The crossover occurs where
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>40</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mi>R</mi></mrow></math>, with both times
+in microseconds: <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>40</mn></mrow></math>.
+Figure <a href="chapter-02.html#ref-fig:cost-curves">2.1</a> plots both costs and the resulting output rate.
+</p>
+<figure class="figure">
+<p class="noindent" id="-calculated-from-the-hypothetical-model-in-labscostpy-both-panels-use-ordinary-decode-with-one-evaluated-position-and-one-useful-token-per-request-per-step-nr-the-left-shows-the-competing-costs-the-right-shows-output-throughput-both-plots-read-the-csv-saved-by-the-experiment"><img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
+ordinary decode, with one evaluated position and one useful token per request per step
+( N = R ).
+The left shows the competing costs; the right shows output throughput. Both plots read
+the CSV saved by the experiment." loading="lazy" src="sample0x.svg"/>
+<img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
+ordinary decode, with one evaluated position and one useful token per request per step
+( N = R ).
+The left shows the competing costs; the right shows output throughput. Both plots read
+the CSV saved by the experiment." loading="lazy" src="sample1x.svg"/>
+<a id="x1-9001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 2.1: </span><span class="content">Calculated from the hypothetical model in <code>labs/05_cost.py</code>. Both panels use
+ordinary decode, with one evaluated position and one useful token per request per step
+(<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>).
+The left shows the competing costs; the right shows output throughput. Both plots read
+the CSV saved by the experiment.
+</span></figcaption>
+<a id="ref-fig:cost-curves"></a>
+</figure>
+<p class="indent">   For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mn>40</mn></mrow></math>, equation <a href="chapter-02.html#ref-eq:step-cost">2.1</a>
+becomes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>20</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn><mi>R</mi></mrow></math>
+microseconds. The output rate is therefore </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mfrac><mrow><mi>R</mi></mrow>
+<mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>20</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo><mspace class="thinspace" width="0.17em"></mspace><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>6</mn></mrow></msup></mrow></mfrac><mspace class="nbsp" width="0.33em"></mspace><mstyle class="text"><mtext>tokens per second</mtext></mstyle><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   It approaches 500,000 tokens per second as the fixed cost becomes a smaller fraction of each
+step. Latency keeps growing. There is no single best batch size until we also state a latency limit,
+memory capacity and available work.
+</p><p class="indent">   This reasoning is the basis of the <em>roofline </em>model: arithmetic throughput is bounded by the smaller of compute
+capacity <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> and bandwidth
+times <em>arithmetic intensity</em>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>I</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>F</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>M</mi></mrow></math>,
+measured in operations per byte. The original paper calls this <em>operational intensity</em>
+and counts traffic between cache and main memory <span class="cite">[<a href="references.html#Xroofline">9</a>]</span>. Here the crossover has
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>I</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>P</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>10</mn></mrow></math> operations per
+byte: 80 million operations divided by eight million bytes. The roofline bound excludes our separately added
+serial overhead <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math>;
+our plots show step time and token rate, rather than a conventional roofline plot.
+</p><p class="indent">   This saving relies on the shared read actually being shared. A <em>mixture of experts </em>(MoE)
+model routes positions to selected parameter arrays called experts. A larger batch can
+touch more experts, so the shared-byte term need not stay fixed. Chapter 7 will follow
+this cost across devices in Wide-EP. Similarly, a batch of longer contexts can require
+more saved-state traffic per request. The next two lines change one condition at a
+time:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>One change at a time (microseconds)
+R=N=16, double compute rate: 76.0 -&gt; 76.0
+R=N=32, four times context traffic: 92.0 -&gt; 188.0
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/05_cost.txt">results/05_cost.txt</a></div></div>
+<p class="indent">   Doubling the arithmetic rate at <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>16</mn></mrow></math>
+reduces its compute term from 32 to 16 microseconds. Transfer still takes
+56, so the step remains 76. Multiplying the per-request traffic by four at
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>32</mn></mrow></math> raises
+the transfer term from 72 to 168 microseconds, and the step grows from 92 to 188. The argument
+for batching survives; the cost curve changes with the workload.
+</p>
+<h4 class="subsectionHead" id="more-positions-can-reuse-the-same-context"><span class="titlemark">2.2.1   </span> <a id="x1-100002.2.1"></a>More positions can reuse the same context</h4>
+<p class="noindent">Now hold the request count at 16 and increase only the evaluated positions. The experiment
+keeps transfer at 56 microseconds:
+                                                                                  
+                                                                                  
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Same 16 requests, more positions (microseconds)
+ R   N  transfer  compute     step
+16  16      56.0     32.0     76.0
+16  28      56.0     56.0     76.0
+16  96      56.0    192.0    212.0
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/05_cost.txt">results/05_cost.txt</a></div></div>
+<p class="indent">   At <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>28</mn></mrow></math>,
+compute catches up with transfer, yet the step still takes 76 microseconds.
+The extra 12 positions add no step time under our assumptions. At
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>96</mn></mrow></math>,
+compute takes 192 microseconds and the step takes 212. Reusing context makes some verification
+work cheap; it does not make unlimited work free. Nor are evaluated positions necessarily useful
+output tokens.
+</p>
+<h4 class="subsectionHead" id="bytes-per-element-are-part-of-the-model"><span class="titlemark">2.2.2   </span> <a id="x1-110002.2.2"></a>Bytes per element are part of the model</h4>
+<p class="noindent">An array’s element count does not yet tell us its byte count. A conventional 32-bit value occupies
+four bytes; a 16-bit value occupies two. Lower-precision formats can use fewer bits for values while
+storing extra information needed to interpret groups of them. Allocation alignment can add
+further padding.
+</p><p class="indent">   For example, an invented format holding 32 one-byte values plus one two-byte scale
+occupies 34 bytes, or 1.0625 bytes per value. Multiplying the element count by one
+would miss the scale. The example illustrates accounting, not a particular DeepInfer
+layout.
+</p><p class="indent">   The deployment Q&amp;A gives a concrete unit for later chapters: 528 bytes per token per stored
+layer for its MXFP8 sliding-window attention KV state <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. That is a layout size, not a
+whole-model per-token budget. We will count layers and retained positions when we derive
+memory requirements. For a traffic estimate, we must also establish how often those bytes
+are read. Bytes retained in memory and bytes transferred during a step are different
+quantities.
+</p>
+<h3 class="sectionHead" id="count-useful-output-separately"><span class="titlemark">2.3   </span> <a id="x1-120002.3"></a>Count useful output separately</h3>
+<p class="noindent">In the ordinary-decode sweep, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>
+evaluated positions produce <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>
+useful tokens. Verification breaks this equality. A later chapter will let a cheaper predictor
+propose tokens that the main model checks; some checked positions may not become output. Let
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>U</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> be the
+useful output from a step. The rate we want is <a id="ref-eq:useful-rate"></a></p><div class="equation-scroll" tabindex="0"><table class="equation"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="label" id="x1-12001r2"></mstyle><mstyle class="text"><mtext>useful throughput</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>U</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></mfrac><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td><td class="eq-no">(2.2)</td></tr></table></div>
+<p class="indent">   For repeated steps of different sizes, measure total useful tokens divided by total elapsed time.
+Averaging individual step rates without weighting their durations answers a different
+question.
+</p><p class="indent">   The cost script finishes with two assigned useful-output counts for the same 16 requests,
+evaluating either 32 or 64 positions:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Assigned useful-output counts; rate = U / step_s
+R=16, N=32, U=24: 84 us, 285714 useful tokens/s
+R=16, N=64, U=28: 148 us, 189189 useful tokens/s
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/05_cost.txt">results/05_cost.txt</a></div></div>
+<p class="indent">   The second choice produces more useful tokens per step, 28 instead of 24, but its time grows
+from 84 to 148 microseconds. Both choices read the same context; the additional arithmetic
+causes the increase. The useful rate falls. These assigned counts are an arithmetic exercise;
+chapter 8 will derive expected output from acceptance probabilities. Its policy will need both that
+numerator and a cost curve for the denominator.
+</p><p class="indent">   This distinction already matters in DeepInfer. The deployment Q&amp;A describes
+DSpark allocating verification work using predicted acceptance and a profiled hardware
+throughput curve. Its table estimates a change from fixed-5 to variable-length verification of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1.5</mn><mi>%</mi></mrow></math> at 16 concurrent
+requests per rank, but <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">+</mo><mn>11</mn><mi>%</mi></mrow></math>
+at 96 <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. Our model suggests a reason for this trend: at low concurrency, removing positions may
+save little time because transfer still dominates; as concurrency grows, reducing verification
+arithmetic can shorten a compute-limited step. This is an interpretation, not a reproduction of
+those figures. Chapter 8 will combine acceptance with measured costs; the hypothetical constants
+cannot choose a production budget.
+</p>
+<h3 class="sectionHead" id="read-a-request-timeline"><span class="titlemark">2.4   </span> <a id="x1-130002.4"></a>Read a request timeline</h3>
+<p class="noindent">A step duration does not say how long a user waits for the first token. The next experiment reads
+<span class="path"><code>labs/data/06_request_trace.json</code></span>, a saved teaching trace with assigned timestamps. All
+events use the same observation clock and all times are in milliseconds. The records specify
+arrival, the start and end of prompt processing, and the delivery time of every output
+token.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/06_trace.py
+</code></pre></div>
+<p class="indent">   Before running it, consider request E. It arrives at 3, starts prompt processing at 30, ends
+that span at 42, and delivers tokens at 45, 49 and 65. How much of its first-token
+wait occurs before prompt work starts? Figure <a href="chapter-02.html#ref-fig:latency-boundaries">2.2</a> marks the boundaries the script
+uses.
+</p>
+<figure class="figure">
+<p class="noindent" id="-the-observation-boundaries-used-by-the-trace-experiment-all-events-use-one-clock-widths-are-schematic-the-firsttoken-wait-and-later-token-gaps-measure-different-intervals"><img alt="Figure 2.2: The observation boundaries used by the trace experiment. All events use one
+clock. Widths are schematic; the first-token wait and later token gaps measure different
+intervals." loading="lazy" src="sample2x.svg"/>
+<a id="x1-13001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 2.2: </span><span class="content">The observation boundaries used by the trace experiment. All events use one
+clock. Widths are schematic; the first-token wait and later token gaps measure different
+intervals.
+</span></figcaption>
+<a id="ref-fig:latency-boundaries"></a>
+</figure>
+<p class="indent">   For arrival <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>,
+prompt start <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math>,
+prompt end <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>e</mi></mrow></math> and
+token delivery times <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>t</mi></mrow><mrow><mn>1</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>t</mi></mrow><mrow><mn>2</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mo>…</mo></mrow></math>,
+the script computes </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>Q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>s</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>S</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>e</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>s</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>D</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>t</mi></mrow><mrow><mn>1</mn></mrow></msub> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>e</mi><mo class="MathClass-punc" stretchy="false">,</mo>
+</mrow></math></td></tr></table></div>
+<div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle mathvariant="normal"><mi>TTFT</mi></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>t</mi></mrow><mrow><mn>1</mn></mrow></msub> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>a</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>Q</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>S</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>D</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><msub><mrow><mi mathvariant="normal">Δ</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>t</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-bin" stretchy="false">−</mo> <msub><mrow><mi>t</mi></mrow><mrow><mi>i</mi><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></msub><mspace class="quad" width="1em"></mspace><mo class="MathClass-open" stretchy="false">(</mo><mi>i</mi> <mo class="MathClass-rel" stretchy="false">≥</mo> <mn>2</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent"> <em>Time to first token </em>(TTFT) includes queueing in this definition. The <em>time between tokens </em>is a sequence of
+gaps <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi mathvariant="normal">Δ</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>, rather than
+one number. We call <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>D</mi></mrow></math>
+the <em>publish gap </em>in this book; DeepInfer does not use that name. It covers everything between
+the recorded end of prompt processing and the first delivery, and need not be one
+operation.
+</p><p class="indent">   These boundaries are chosen for the experiment. In a service, arrival might mean receipt by a
+gateway, admission to an engine or transmission from a client. Token delivery might mean an
+engine callback or data reaching the client. Those choices include different queueing,
+transfer and buffering costs. Write them down before comparing two measurements. Real
+records from several clocks also need clock alignment before we can subtract their
+timestamps.
+</p><p class="indent">   Here is the complete calculation for one request:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.2.</b> Separate first-token waiting from later token gaps.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">14</span><span><span class="k">def</span> <span class="nf">analyse</span><span class="p">(</span><span class="n">request</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>    <span class="n">arrival</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span> <span class="o">=</span> <span class="p">(</span><span class="n">request</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">"arrival"</span><span class="p">,</span> <span class="s2">"prompt_start"</span><span class="p">,</span> <span class="s2">"prompt_end"</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="n">tokens</span> <span class="o">=</span> <span class="n">request</span><span class="p">[</span><span class="s2">"tokens"</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="k">assert</span> <span class="n">tokens</span> <span class="ow">and</span> <span class="n">arrival</span> <span class="o">&lt;=</span> <span class="n">start</span> <span class="o">&lt;=</span> <span class="n">end</span> <span class="o">&lt;=</span> <span class="n">tokens</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>    <span class="k">assert</span> <span class="n">tokens</span> <span class="o">==</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="n">queue</span><span class="p">,</span> <span class="n">prompt</span><span class="p">,</span> <span class="n">publish</span> <span class="o">=</span> <span class="n">start</span> <span class="o">-</span> <span class="n">arrival</span><span class="p">,</span> <span class="n">end</span> <span class="o">-</span> <span class="n">start</span><span class="p">,</span> <span class="n">tokens</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">end</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">ttft</span> <span class="o">=</span> <span class="n">tokens</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">arrival</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="n">gaps</span> <span class="o">=</span> <span class="p">[</span><span class="n">later</span> <span class="o">-</span> <span class="n">earlier</span> <span class="k">for</span> <span class="n">earlier</span><span class="p">,</span> <span class="n">later</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">tokens</span><span class="p">,</span> <span class="n">tokens</span><span class="p">[</span><span class="mi">1</span><span class="p">:])]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="k">assert</span> <span class="n">ttft</span> <span class="o">==</span> <span class="n">queue</span> <span class="o">+</span> <span class="n">prompt</span> <span class="o">+</span> <span class="n">publish</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>    <span class="k">return</span> <span class="n">queue</span><span class="p">,</span> <span class="n">prompt</span><span class="p">,</span> <span class="n">publish</span><span class="p">,</span> <span class="n">ttft</span><span class="p">,</span> <span class="n">gaps</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/06_trace.py">labs/06_trace.py</a> · lines 14–23</div></div>
+<p class="indent">   The saved output includes all five requests:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Synthetic teaching trace: assigned timestamps, not engine measurements
+All times in ms; gaps exclude the wait for the first token
+id  queue  prompt  publish  TTFT  gaps
+A       2       6        2    10  4,4,4
+B       2       6        2    10  -
+C       8       8        3    19  4,4
+D       8       4        3    15  4
+E      27      12        3    42  4,16
+TTFT: n=5, mean=19.2, p50=15, p95=42
+Token gaps: n=8, mean=5.5, p95=16
+Whole trace: 13 tokens / 65 ms = 200.0 tokens/s
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/06_trace.txt">results/06_trace.txt</a></div></div>
+<p class="indent">   E waits 27 milliseconds before prompt processing begins, then spends 12 in the prompt span
+and three in the publish gap. Its TTFT is 42 milliseconds. Its later gaps are four and
+16 milliseconds. Shortening the first-token queue would not, by itself, remove that
+last pause. Conversely, reporting only its later token gaps would hide the long initial
+wait.
+</p><p class="indent">   A faster kernel can leave first-token latency almost unchanged when the request spends most
+of its time waiting to run. Suppose an illustrative request waits 30 milliseconds, then takes 10
+milliseconds to reach its first token. Halving all of that latter work reduces TTFT from 40
+to 35 milliseconds, not to 20. The timeline tells us which part an optimisation can
+shorten.
+</p><p class="indent">   The prompt span measures elapsed time between two markers, not pure arithmetic. If a real
+request’s prompt work is chunked and interleaved with other requests, that span can include
+intervening waits. Likewise, device execution, host processing and delivery can overlap across
+requests. Adding every recorded operation duration is not generally a way to recover wall-clock
+time.
+</p>
+<h4 class="subsectionHead" id="look-beyond-an-average"><span class="titlemark">2.4.1   </span> <a id="x1-140002.4.1"></a>Look beyond an average</h4>
+<p class="noindent">The five TTFTs have a mean of 19.2 milliseconds, but the slowest request waits 42. The script
+also reports sample percentiles. It sorts the values and chooses the element at rank
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mi mathvariant="italic">pN</mi><mo class="MathClass-close" stretchy="false">⌉</mo></mrow></math>,
+counting ranks from one:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.3.</b> The nearest-rank convention used for sample percentiles.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">26</span><span><span class="k">def</span> <span class="nf">percentile</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">fraction</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span><span class="w">    </span><span class="sd">"""Nearest-rank percentile of a non-empty sample, for 0 &lt; fraction &lt;= 1."""</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>    <span class="k">return</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">values</span><span class="p">)[</span><span class="n">ceil</span><span class="p">(</span><span class="n">fraction</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">))</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/06_trace.py">labs/06_trace.py</a> · lines 26–28</div></div>
+<p class="indent">   The sample median, or p50, is 15 milliseconds. With only five values, p95 is the maximum, 42.
+This tiny example shows the calculation; it cannot estimate a production tail reliably. Real
+comparisons need enough requests, a workload description and a stated percentile
+convention.
+</p><p class="indent">   There are eight later-token gaps, with mean 5.5 milliseconds and p95 of 16. Request B has
+only one output token, so it contributes no gap. Substituting zero would invent an observation.
+Pooling all gaps also weights requests with more output tokens more heavily than requests with
+fewer; averaging one mean per request is another convention.
+</p><p class="indent">   Finally, the script counts 13 output tokens over the 65 milliseconds from the first arrival to
+the last delivery: 200 tokens per second. This whole-trace rate includes the initial waits and final
+completion. It is not a steady-state decode rate. An observation window chosen to include only
+busy steps would have a different denominator.
+</p>
+<h3 class="sectionHead" id="trace-work-and-measurements-through-deepinfer"><span class="titlemark">2.5   </span> <a id="x1-150002.5"></a>Trace work and measurements through DeepInfer</h3>
+<p class="noindent">Chapter 1 followed requests through admission, scheduling and execution. We now follow the
+quantities attached to that work: selected positions, estimated operations, observed intervals and
+reported throughput. Figure <a href="chapter-02.html#ref-fig:measurement-path">2.3</a> adds two paths around the same engine. Keeping them separate
+prevents a common mistake: treating a count of operations as if it were a measurement of the
+                                                                                  
+                                                                                  
+time taken to execute them.
+</p>
+<figure class="figure">
+<p class="noindent" id="-two-accounting-paths-around-the-engine-in-figure-the-upper-path-estimates-scheduled-work-the-lower-observes-elapsed-time-the-benchmarks-tokenrate-formula-uses-the-lower-path-plus-request-and-draft-counts-not-the-flops-estimate-deepinferschedulerdeepinferflopsdeepinferenginedeepinferbenchmark"><img alt="Figure 2.3: Two  accounting  paths  around  the  engine  in  Figure 1.4 .  The  upper  path
+estimates scheduled work; the lower observes elapsed time. The benchmark’s token-rate
+formula  uses  the  lower  path  plus  request  and  draft  counts,  not  the  FLOPs  estimate [ 4 , 5 , 3 , 6 ] ." loading="lazy" src="sample3x.svg"/>
+<a id="x1-15001r3"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 2.3:  </span><span class="content">Two  accounting  paths  around  the  engine  in  Figure <a class="pdf-ref" href="book.pdf#nameddest=figure.caption.6" title="Open this reference in the complete PDF">1.4</a>.  The  upper  path
+estimates scheduled work; the lower observes elapsed time. The benchmark’s token-rate
+formula  uses  the  lower  path  plus  request  and  draft  counts,  not  the  FLOPs  estimate
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler">4</a>, <a href="references.html#Xdeepinfer-flops">5</a>, <a href="references.html#Xdeepinfer-engine">3</a>, <a href="references.html#Xdeepinfer-benchmark">6</a>]</span>.
+</span></figcaption>
+<a id="ref-fig:measurement-path"></a>
+</figure>
+<h4 class="subsectionHead" id="from-scheduled-positions-to-an-operation-count"><span class="titlemark">2.5.1   </span> <a id="x1-160002.5.1"></a>From scheduled positions to an operation count</h4>
+<p class="noindent">The C++ scheduler constructs per-request metadata after selecting a batch. Inside its loop over
+selected sequences, it obtains two lengths:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.4.</b> Scheduled work combines cached, pending and new positions.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">696</span><span><span class="kt">int</span><span class="w"> </span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">scheduler_outputs</span><span class="p">.</span><span class="n">seqlens_q</span><span class="p">[</span><span class="n">i</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">697</span><span><span class="kt">int</span><span class="w"> </span><span class="n">seqlen_k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">num_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">total_inflight_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seqlen_q</span><span class="p">;</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L696-L697">csrc/engine/scheduler.hpp</a> · lines 696–697</div></div>
+<p class="indent">   Here <code>seqlen_q </code>counts the new positions selected for this request. <code>seqlen_k</code>
+extends the cached prefix by pending positions and the new work. For an assigned
+example with 128 cached positions, two in flight and three selected, the metadata has
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>k</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>133</mn></mrow></math>. It
+does not say that all 133 positions have completed. The pending term connects directly to the
+delayed worker state from chapter 1.
+</p><p class="indent">   Across requests, the sum of selected <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math>
+values plays the role of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+in our cost model; the number of selected requests plays the role of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>. Two batches
+with the same <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+can have different request counts and context lengths. The teaching model represents that
+difference with context bytes per request. DeepInfer retains individual lengths and model
+structure rather than reducing every step to one batch-size scalar.
+</p><p class="indent">   When statistics are enabled, the same metadata-construction loop calls an estimator and adds
+its two results to the batch totals:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.5.</b> Estimate work from the lengths already chosen by scheduling.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">712</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">log_stats</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">713</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_prompt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">scheduler_outputs</span><span class="p">.</span><span class="n">prompt_run</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">714</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">full_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">input</span><span class="p">.</span><span class="n">tokens</span><span class="p">.</span><span class="n">get_len</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">715</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="p">[</span><span class="n">attn</span><span class="p">,</span><span class="w"> </span><span class="n">total</span><span class="p">]</span><span class="w"> </span><span class="o">=</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">716</span><span><span class="w">        </span><span class="n">flops_estimator</span><span class="o">-&gt;</span><span class="n">calc_flops</span><span class="p">(</span><span class="n">seqlen_q</span><span class="p">,</span><span class="w"> </span><span class="n">seqlen_k</span><span class="p">,</span><span class="w"> </span><span class="n">is_prompt</span><span class="p">,</span><span class="w"> </span><span class="n">full_len</span><span class="p">,</span><span class="w"> </span><span class="n">is_prompt</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">swa_valid_start</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">717</span><span><span class="w">    </span><span class="n">attn_flops</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">attn</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">718</span><span><span class="w">    </span><span class="n">total_flops</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">total</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">719</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L712-L719">csrc/engine/scheduler.hpp</a> · lines 712–719</div></div>
+<p class="indent">   The call’s extra arguments describe prompt extent and which sliding-window state is valid.
+Chapters 3 and 9 will explain why these boundaries affect the model’s work. For now, follow the
+returned pair into the estimator itself:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.6.</b> Separate attention work while including it in the total.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">37</span><span><span class="c1">// Return (attention, total); total already includes attention. Scheduler</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">38</span><span><span class="c1">// calls this directly from its existing per-request metadata construction.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">calc_flops</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">q</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">k</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_prompt</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">full_len</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">swa_valid_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="p">[</span><span class="n">full</span><span class="p">,</span><span class="w"> </span><span class="n">consumer</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_ranges</span><span class="p">(</span><span class="n">q</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="p">,</span><span class="w"> </span><span class="n">is_prompt</span><span class="p">,</span><span class="w"> </span><span class="n">full_len</span><span class="p">,</span><span class="w"> </span><span class="n">swa_valid_start</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">attn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">calc_attn_flops</span><span class="p">(</span><span class="n">full</span><span class="p">,</span><span class="w"> </span><span class="n">consumer</span><span class="p">,</span><span class="w"> </span><span class="n">is_prompt</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">non_attn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">calc_non_attn_flops</span><span class="p">(</span><span class="n">full</span><span class="p">.</span><span class="n">rows</span><span class="p">(),</span><span class="w"> </span><span class="n">consumer</span><span class="p">.</span><span class="n">rows</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">logits</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">calc_logits_flops</span><span class="p">(</span><span class="n">q</span><span class="p">,</span><span class="w"> </span><span class="n">is_prompt</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">attn</span><span class="p">,</span><span class="w"> </span><span class="n">attn</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">non_attn</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">logits</span><span class="p">};</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp#L37-L45">csrc/engine/flops_estimator.hpp</a> · lines 37–45</div></div>
+<p class="indent">   The method derives row ranges, counts attention, counts other model operations
+and counts the projection that produces token scores, called logits. Its return value is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mi>A</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>A</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>O</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>L</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, not
+three independent counters. Adding its two returned numbers would count attention twice. The
+two row ranges accommodate differences between layers; chapter 9 explains the full and consumer
+row ranges when it counts truncated prefill.
+</p><p class="indent">   Back in the scheduler, lines 730–731 divide the accumulated counts by
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>12</mn></mrow></msup></mrow></math> and
+store them in <code>attn_tflops </code>and <code>total_tflops</code>. Despite their names, these fields hold
+tera-operation <em>amounts </em>for the scheduled batch, not operations per second. The engine copies
+them into <code>StepStats </code>during post-processing. No elapsed time appears in the estimator call or
+that unit conversion <span class="cite">[<a href="references.html#Xdeepinfer-scheduler">4</a>, <a href="references.html#Xdeepinfer-flops">5</a>, <a href="references.html#Xdeepinfer-engine">3</a>]</span>.
+</p><p class="indent">   Notice the direction of the dependency: selected lengths feed this logging branch. This call is
+not choosing the verification budget. DSpark’s documented use of a profiled cost curve is a
+different path, which chapter 8 will trace. The distinction matters when locating code to
+investigate a scheduling choice.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="an-operation-estimate-has-a-scope"><span class="titlemark">2.5.2   </span> <a id="x1-170002.5.2"></a>An operation estimate has a scope</h4>
+<p class="noindent">A floating-point operation is often abbreviated to <em>FLOP</em>. Counting a multiply and an addition as
+two operations is a common convention. DeepInfer’s estimator goes further: it assigns
+format-dependent weights to express work in FP8-equivalent FLOPs.
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.7.</b> Precision weights and the estimator’s stated scope.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">13</span><span><span class="c1">// GEMM coefficients include multiply-add (2 FLOPs) and the FP8-equivalent weight.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span><span class="k">namespace</span><span class="w"> </span><span class="nn">flops_coef</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">FP4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">FP8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">BF16</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">TF32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">FP32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TF32</span><span class="p">;</span><span class="w"> </span><span class="c1">// Accounting reference, not actual kernel precision.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span><span class="p">}</span><span class="w"> </span><span class="c1">// namespace flops_coef</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span><span class="c1">// Estimate main-model work in FP8-equivalent FLOPs; FP32/TF32 use weight 4.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span><span class="c1">// Count major contractions regardless of bottleneck; exclude draft/padding/replicas.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span><span class="c1">// MFU measures target-model FLOPs throughput; DFlash is extra compute used</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span><span class="c1">// to accelerate that model, so its FLOPs are excluded.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span><span class="c1">// Omit small arithmetic (norms/activations). TODO: vision.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span><span class="c1">// Scheduled q/k ignore acceptance/ZOS corrections.</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp#L13-L27">csrc/engine/flops_estimator.hpp</a> · lines 13–27</div></div>
+<p class="indent">   The comments use GEMM for matrix multiplication and MFU for model FLOPs utilisation,
+which compares the model’s arithmetic rate with a compute-capacity reference.
+</p><p class="indent">   FP8 denotes an eight-bit floating-point format family; FP4 uses four-bit values, and BF16 is a
+sixteen-bit format. The coefficients here describe normalised arithmetic accounting, not bytes per
+element. The factor for a multiply-add is already included: the FP8 coefficient is two and the
+BF16 coefficient is four. The comment’s FP32/TF32 precision weight of four likewise becomes the
+code’s coefficient of eight after multiplication by two. Dividing this estimate by an arbitrary
+device’s advertised operation rate would mix conventions unless the rate uses compatible weights
+and scope <span class="cite">[<a href="references.html#Xdeepinfer-flops">5</a>]</span>.
+</p><p class="indent">   The comments also exclude draft-model work, padding and replicas, and say
+that scheduled lengths have not incorporated acceptance or ZOS corrections. The
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>k</mi></mrow></math> values
+we traced are therefore scheduling-time inputs to an accounting estimate, not a complete record
+of what every kernel finally ran. A higher main-model FLOPs rate does not prove that a
+request completed sooner, especially if extra work outside that count was used to obtain
+it.
+</p>
+<h4 class="subsectionHead" id="a-benchmark-chooses-its-observation-window"><span class="titlemark">2.5.3   </span> <a id="x1-180002.5.3"></a>A benchmark chooses its observation window</h4>
+<p class="noindent">Now follow the lower path in Figure <a href="chapter-02.html#ref-fig:measurement-path">2.3</a>. The benchmark drives the same <code>LLMEngine.step </code>that
+chapter 1 inspected, but it controls when step returns enter a measurement window. A bounded
+queue stores timestamps and flags:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.8.</b> Reserve one more endpoint than the number of desired intervals.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">380</span><span><span class="n">stable_prefill</span><span class="p">:</span> <span class="n">deque</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="n">deque</span><span class="p">(</span><span class="n">maxlen</span><span class="o">=</span><span class="n">prefill_measure_steps</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">381</span><span><span class="n">stable_decode</span><span class="p">:</span> <span class="n">deque</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="n">deque</span><span class="p">(</span><span class="n">maxlen</span><span class="o">=</span><span class="n">decode_measure_steps</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L380-L381">examples/benchmark.py</a> · lines 380–381</div></div>
+<p class="indent"> <code>decode_measure_steps </code>is 60 in this edition, so the decode queue holds 61 endpoints.
+Adjacent endpoints define 60 intervals. This is a different use of a queue from the scheduler’s
+<code>waiting</code>: it stores observations, not requests available to run.
+</p><p class="indent">   The surrounding control flow separates unmeasured work from collection:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.9.</b> Run two unmeasured segments before filling the decode window.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">499</span><span><span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">decode_warmup_steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">500</span><span>    <span class="k">if</span> <span class="ow">not</span> <span class="n">llm</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">has_unfinished_requests</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">501</span><span>        <span class="k">break</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">502</span><span>    <span class="n">run_decode_step</span><span class="p">(</span><span class="n">measure</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">503</span><span><span class="n">set_engine_log_interval</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">504</span><span><span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">decode_measure_steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">505</span><span>    <span class="k">if</span> <span class="ow">not</span> <span class="n">llm</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">has_unfinished_requests</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">506</span><span>        <span class="k">break</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">507</span><span>    <span class="n">run_decode_step</span><span class="p">(</span><span class="n">measure</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">508</span><span><span class="n">set_engine_log_interval</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">509</span><span><span class="k">while</span> <span class="nb">len</span><span class="p">(</span><span class="n">stable_decode</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">stable_decode</span><span class="o">.</span><span class="n">maxlen</span> <span class="ow">and</span> <span class="n">llm</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">has_unfinished_requests</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">510</span><span>    <span class="n">run_decode_step</span><span class="p">(</span><span class="n">measure</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L499-L510">examples/benchmark.py</a> · lines 499–510</div></div>
+<p class="indent">   The first loop performs up to 50 warm-up steps. The next performs up to 60 unmeasured steps
+with a different logging interval. Only the final loop calls <code>run_decode_step(measure=True)</code>.
+Filling 61 entries can require more than 61 calls because the inner function also checks the
+running-request count. Every loop can stop early when no unfinished requests remain. A separate
+profiler segment follows this window; its calls use <code>measure=False</code>.
+</p><p class="indent">   The benchmark records a host timestamp after <code>step() </code>returns, and only when the
+                                                                                  
+                                                                                  
+running-request count matches its requested decode concurrency:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.10.</b> Select step endpoints for the decode window.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">435</span><span><span class="k">def</span> <span class="nf">run_decode_step</span><span class="p">(</span><span class="o">*</span><span class="p">,</span> <span class="n">measure</span><span class="p">:</span> <span class="nb">bool</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">436</span><span>    <span class="n">countdown_before</span> <span class="o">=</span> <span class="n">lb_flush_countdown</span><span class="p">()</span> <span class="k">if</span> <span class="n">measure</span> <span class="k">else</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">437</span><span>    <span class="n">llm</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">step</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">438</span><span>    <span class="k">if</span> <span class="n">measure</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">llm</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">running</span><span class="p">)</span> <span class="o">==</span> <span class="n">args</span><span class="o">.</span><span class="n">decode_num_requests</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">439</span><span>        <span class="n">flushed</span> <span class="o">=</span> <span class="n">countdown_before</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">lb_flush_countdown</span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">countdown_before</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">440</span><span>        <span class="n">stable_decode</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">time</span><span class="o">.</span><span class="n">perf_counter</span><span class="p">(),</span> <span class="n">flushed</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L435-L440">examples/benchmark.py</a> · lines 435–440</div></div>
+<p class="indent"> <code>flushed </code>here tracks expert-load-balancing statistics flushes. It does not mean the final
+in-flight-request flush from chapter 1. The interval calculation filters out steps marked by those
+statistics flushes:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.11.</b> Steps per second over selected intervals.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">399</span><span><span class="n">clean</span> <span class="o">=</span> <span class="p">[</span><span class="n">ts</span> <span class="o">-</span> <span class="n">prev</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">prev</span><span class="p">,</span> <span class="p">(</span><span class="n">ts</span><span class="p">,</span> <span class="n">flushed</span><span class="p">)</span> <span class="ow">in</span> <span class="n">pairwise</span><span class="p">(</span><span class="n">stable_decode</span><span class="p">)</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">flushed</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">400</span><span><span class="k">if</span> <span class="ow">not</span> <span class="n">clean</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">401</span><span>    <span class="k">return</span> <span class="p">{}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">402</span><span><span class="n">avg_sps</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">clean</span><span class="p">)</span> <span class="o">/</span> <span class="nb">sum</span><span class="p">(</span><span class="n">clean</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L399-L402">examples/benchmark.py</a> · lines 399–402</div></div>
+<p class="indent">   The numerator is the number of selected intervals; the denominator is their summed
+duration. The timestamps are qualifying step-return boundaries, not per-request token
+arrivals. If an intervening call fails the concurrency check, it creates no entry, but its
+elapsed time can still lie between stored endpoints. There is no separate counter of those
+omitted calls in <code>stable_decode</code>. The selected-window rate is most straightforward when
+concurrency stays stable, which is what the benchmark arranges its workload to study
+<span class="cite">[<a href="references.html#Xdeepinfer-benchmark">6</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="follow-one-interval-through-the-filter"><span class="titlemark">2.5.4   </span> <a id="x1-190002.5.4"></a>Follow one interval through the filter</h4>
+<p class="noindent">Use four assigned endpoint times to read the filter. These milliseconds are illustrative inputs, not
+benchmark results; the implementation stores seconds. </p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-1"><colgroup id="TBL-1-1g"><col id="TBL-1-1"/><col id="TBL-1-2"/><col id="TBL-1-3"/><col id="TBL-1-4"/></colgroup><tr id="TBL-1-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-1-1" style="text-align:right; white-space:nowrap;">Endpoint (ms)  </td><td class="td11" id="TBL-1-1-2" style="text-align:right; white-space:nowrap;"> Flush flag  </td><td class="td11" id="TBL-1-1-3" style="text-align:right; white-space:nowrap;"> Interval (ms)  </td><td class="td10" id="TBL-1-1-4" style="text-align:left; white-space:nowrap;"> Treatment            </td>
+</tr><tr id="TBL-1-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-2-1" style="text-align:right; white-space:nowrap;">            0  </td><td class="td11" id="TBL-1-2-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-2-3" style="text-align:right; white-space:nowrap;">          —  </td><td class="td10" id="TBL-1-2-4" style="text-align:left; white-space:nowrap;"> First endpoint only</td>
+</tr><tr id="TBL-1-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-3-1" style="text-align:right; white-space:nowrap;">            4  </td><td class="td11" id="TBL-1-3-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-3-3" style="text-align:right; white-space:nowrap;">           4  </td><td class="td10" id="TBL-1-3-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
+</tr><tr id="TBL-1-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-4-1" style="text-align:right; white-space:nowrap;">           10  </td><td class="td11" id="TBL-1-4-2" style="text-align:right; white-space:nowrap;">     True  </td><td class="td11" id="TBL-1-4-3" style="text-align:right; white-space:nowrap;">           6  </td><td class="td10" id="TBL-1-4-4" style="text-align:left; white-space:nowrap;"> Exclude               </td>
+</tr><tr id="TBL-1-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-5-1" style="text-align:right; white-space:nowrap;">           15  </td><td class="td11" id="TBL-1-5-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-5-3" style="text-align:right; white-space:nowrap;">           5  </td><td class="td10" id="TBL-1-5-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
+</tr></table></div> </div></div>
+<p class="indent"> <code>pairwise </code>forms adjacent pairs before the comprehension applies its filter. The flag at
+10 excludes the interval from 4 to 10; the next pair still starts at 10. The result is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>0.004</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.005</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, about
+222.2 selected intervals per second. Removing the flagged endpoint first would incorrectly join 4 to 15,
+giving <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>0.015</mn></mrow></math>,
+about 133.3. The order of pairing and filtering is part of the metric’s definition.
+</p><p class="indent">   The source detects a statistics flush when its countdown increases across the step. This
+protects the chosen comparison from that maintenance cost; it does not make the cost disappear
+from service execution. If no eligible intervals remain, <code>measure_decode </code>returns an
+empty dictionary. A caller must not interpret that as a measured zero-throughput
+run.
+</p>
+<h4 class="subsectionHead" id="from-a-local-step-rate-to-a-reported-token-rate"><span class="titlemark">2.5.5   </span> <a id="x1-200002.5.5"></a>From a local step rate to a reported token rate</h4>
+<p class="noindent">The output dictionary converts that step rate into a token rate with this line:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.12.</b> The reported decode-token formula; enclosing dictionary omitted.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">408</span><span><span class="s2">"decode_tokens_per_s_per_gpu"</span><span class="p">:</span> <span class="n">avg_sps</span> <span class="o">*</span> <span class="n">args</span><span class="o">.</span><span class="n">decode_num_requests</span> <span class="o">*</span> <span class="p">(</span><span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_USE_NEXTN_DECODE</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">cp_size</span><span class="p">,</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L408">examples/benchmark.py</a> · line 408</div></div>
+<p class="indent">   The source itself explains how to interpret and convert this metric. Here are the complete
+comments on lines 405 and 407 (author’s translations; <code>nextn </code>is the configured draft
+length):
+     </p><blockquote class="quote">
+<p class="noindent">“With VARLEN=0, each step always submits <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">nextn</mtext></mstyle></mrow></math>
+     tokens,  so  it  is  independent  of  acceptance  rate.”  (Line  405,  attached  to
+     <code>decode_avg_sps</code>.)
+     </p><p class="noindent">“Full-acceptance accounting: count <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">nextn</mtext></mstyle></mrow></math>
+     tokens per request per step; to use a different <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math>,
+     recalculate from <code>decode_avg_sps</code>.” (Line 407.)</p></blockquote>
+<p class="noindent">Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math> is
+the average useful output per request per step. The fixed submission size is the premise for
+holding step rate fixed while changing that output count. It is not a guarantee that every other
+runtime cost is invariant.
+</p><p class="indent">   For an illustrative <code>cp_size=1</code>, 16 requests, 200 steps per second and five draft tokens, it reports
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>200</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>16</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>6</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>19</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>200</mn></mrow></math> tokens per
+second. Using <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>
+at that same step rate gives useful throughput of 9,600. This is the conversion the
+comment describes. With <code>VARLEN=1</code>, acceptance affects the number of submitted positions
+and hence can change step rate, as the comment on line 539 also warns. We must
+measure that policy’s time and useful output together, rather than reuse the fixed-length
+timing.
+</p><p class="indent">   The denominator <code>cp_size </code>also needs a scope. The launcher runs a separate request batch
+for each data-parallel (DP) rank, and only rank 0 writes the metrics. Each rank uses
+<code>cp_size </code>devices for context parallelism (CP), which shares its context work across those
+devices. Thus this “per GPU” metric divides rank 0’s local request throughput by its CP
+device count; it is not a sum over all ranks divided by all devices. Here <code>ep_size </code>is
+the total device count and <code>dp_size </code>the number of request-serving ranks, with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mstyle class="text"><mtext class="texttt" mathvariant="monospace">ep_size</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">dp_size</mtext></mstyle><mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">cp_size</mtext></mstyle></mrow></math>. Equal
+rates across ranks would make the two averages agree, but this reporting code does not check that
+condition <span class="cite">[<a href="references.html#Xdeepinfer-benchmark">6</a>, <a href="references.html#Xdeepinfer-launch">7</a>, <a href="references.html#Xdeepinfer-config">8</a>]</span>. Preserve useful output counts and elapsed times for every rank needed in a
+system-wide comparison.
+</p><p class="indent"> <code>measure_decode </code>returns its dictionary to the rank-0 reporting block. That block formats the
+console result and can save configuration together with the measured fields:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 2.13.</b> Persist the selected metrics with the configuration that defines them.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">554</span><span><span class="k">if</span> <span class="n">args</span><span class="o">.</span><span class="n">result_jsonl</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">555</span><span>    <span class="n">result</span> <span class="o">=</span> <span class="n">benchmark_config</span> <span class="o">|</span> <span class="n">prefill_metrics</span> <span class="o">|</span> <span class="n">decode_metrics</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">556</span><span>    <span class="n">args</span><span class="o">.</span><span class="n">result_jsonl</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">557</span><span>    <span class="k">with</span> <span class="n">args</span><span class="o">.</span><span class="n">result_jsonl</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s2">"a"</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">558</span><span>        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="nb">str</span><span class="p">)</span> <span class="o">+</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">559</span><span>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Benchmark result appended to </span><span class="si">{</span><span class="n">args</span><span class="o">.</span><span class="n">result_jsonl</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py#L554-L559">examples/benchmark.py</a> · lines 554–559</div></div>
+<p class="indent">   The saved decode fields include the selected interval count, step rate and maximum selected
+interval, plus the full-acceptance token rate. They do not contain the raw endpoint
+queue or observed useful token counts. Recomputing a rate under another assumed
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math>
+is possible; auditing a different interval filter or the realised useful output requires
+additional records. This follows from the dictionary being written, not from the file’s JSON
+format.
+</p><p class="indent">   We can now locate three different changes. To change which calls count as measurement,
+inspect the window loops and <code>run_decode_step</code>. To change the exclusion rule, inspect the
+<code>pairwise </code>comprehension. To replace full-acceptance accounting with useful throughput, obtain
+                                                                                  
+                                                                                  
+useful counts over the same time window before changing the reporting formula. Editing the
+FLOPs estimator would address none of those three questions.
+</p>
+<div class="tcolorbox questionbox" id="tcolobox-2">
+<div class="tcolorbox-title">
+<p class="indent">   A cost curve belongs to a hardware setup</p></div>
+<div class="tcolorbox-content"><p class="noindent">The deployment Q&amp;A puts support for multiple accelerator vendors among its system
+goals. The inspected release supports NVIDIA SM100 and Huawei Ascend 950; its
+README limits batch-invariant inference to NVIDIA <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="noindent">Record the platform, numerical formats, kernels, parallel layout and measurement
+boundary with a curve. A result on one setup is not a rate constant for another. The
+model above can organise either investigation, but its parameters must come from
+the setup being studied. </p>
+</div>
+</div>
+<p class="indent">   The next chapter opens the context-byte term in this model. It explains what the cached rows
+contain, which reads remain after caching, and how DeepInfer’s attention layout determines their
+size.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next"><span class="titlemark">2.6   </span> <a id="x1-210002.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-21002x1">Impose a 150-microsecond step limit in the hypothetical model. Which integer request
+     count, with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>,
+     gives  the  highest  output  rate  within  it?  What  changes  if  per-request  traffic  is
+     multiplied by four?
+     </li>
+<li class="enumerate" id="x1-21004x2">Halve the fixed overhead, then halve the arithmetic cost. Compare the effects at
+     <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>
+     and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>64</mn></mrow></math>.
+     Which assumption makes each change useful? Then hold <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>16</mn></mrow></math>
+     and find the largest <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+     that adds no time over ordinary decode.
+     </li>
+<li class="enumerate" id="x1-21006x3">In a scratch copy of the trace, delay all of E’s token deliveries by ten milliseconds
+     without moving its prompt markers. Which of TTFT, publish gap, later-token gaps
+     and whole-trace throughput change?
+     </li>
+<li class="enumerate" id="x1-21008x4">For a benchmark report, write down the numerator, the time endpoints and any
+     excluded intervals. Which additional raw count would let you turn a full-acceptance
+     rate into an observed useful-output rate?
+     </li>
+<li class="enumerate" id="x1-21010x5">In the assigned endpoint table, mark the endpoint at 15 as a flush too. Which interval
+     survives? Then mark the endpoint at 4 as a flush: which branch of <code>measure_decode</code>
+     runs, and what should a report say?
+     </li>
+<li class="enumerate" id="x1-21012x6">Locate the logging branch that calls <code>calc_flops</code>. Explain why reducing its estimate
+     alone  cannot  change  the  number  of  positions  selected  for  verification  or  the
+     benchmark’s reported token rate.</li></ol>
+
+</article><nav class="page-turn" aria-label="Sample pages"><a href="index.html"><small>PREVIOUS IN THIS SAMPLE</small>← Preface</a><a class="next" href="book.pdf"><small>CONTINUE READING</small>The complete book ↗</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="COPYRIGHT.txt">Copyright and permissions</a> · Generated from the book’s LaTeX sources.</footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#give-each-cost-a-unit">2.1 Give each cost a unit</a><a class="toc-sub" href="#a-bound-is-not-a-stopwatch">2.1.1 A bound is not a stopwatch</a><a class="" href="#find-what-batching-shares">2.2 Find what batching shares</a><a class="toc-sub" href="#more-positions-can-reuse-the-same-context">2.2.1 More positions can reuse the same context</a><a class="toc-sub" href="#bytes-per-element-are-part-of-the-model">2.2.2 Bytes per element are part of the model</a><a class="" href="#count-useful-output-separately">2.3 Count useful output separately</a><a class="" href="#read-a-request-timeline">2.4 Read a request timeline</a><a class="toc-sub" href="#look-beyond-an-average">2.4.1 Look beyond an average</a><a class="" href="#trace-work-and-measurements-through-deepinfer">2.5 Trace work and measurements through DeepInfer</a><a class="toc-sub" href="#from-scheduled-positions-to-an-operation-count">2.5.1 From scheduled positions to an operation count</a><a class="toc-sub" href="#an-operation-estimate-has-a-scope">2.5.2 An operation estimate has a scope</a><a class="toc-sub" href="#a-benchmark-chooses-its-observation-window">2.5.3 A benchmark chooses its observation window</a><a class="toc-sub" href="#follow-one-interval-through-the-filter">2.5.4 Follow one interval through the filter</a><a class="toc-sub" href="#from-a-local-step-rate-to-a-reported-token-rate">2.5.5 From a local step rate to a reported token rate</a><a class="" href="#experiments-to-try-next">2.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>
