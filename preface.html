@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Preface · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body class="reading-page"><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><img class="book-cover" src="cover.png" width="800" height="1200" alt=""><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Book overview</a><a class="book-link active" href="preface.html" aria-current="page"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="https://leanpub.com/inside-deepinfer-how-an-llm-inference-engine-works">Get the book on Leanpub ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><h1 class="likechapterHead" id="preface"><a id="x1-1000"></a>Preface</h1>
+<p id="preface1"><a id="Q1-1-2"></a>
+</p><p class="noindent">You type a question into ChatGPT and wait. An answer begins to appear. You ask a follow-up,
+referring to something in the reply, and the conversation continues. The text box gives little
+reason to think about the machinery serving it.
+</p><p class="indent">   Behind that exchange, a service must keep many requests moving on shared hardware. Each
+answer needs repeated model calculations; each conversation brings a history that those
+calculations may have to read. Can one pass over the model’s weights serve several requests? How
+much work on the history can be saved before memory runs out? Once an answer is complete,
+when is its memory safe to reuse?
+</p><p class="indent">   An inference engine organises the model computation, saved state and output generation
+behind such a service. This book studies those decisions in DeepSeek’s DeepInfer. It starts device
+work before the host program knows the previous result. It reserves space for guessed tokens that
+may be rejected. With a further optimisation enabled, it can shorten part of a prompt’s
+computation and reconstruct the missing state approximately. Each choice raises a question about
+what the next operation is allowed to assume.
+</p><p class="indent">   We will follow these choices into DeepInfer’s code, using small experiments to expose what
+each operation needs from the last.
+</p>
+<h3 class="likesectionHead" id="why-deepinfer"><a id="x1-2000"></a>Why DeepInfer</h3>
+<p class="noindent">DeepSeek identifies DeepInfer as the engine behind its large-scale production services. It has
+released an offline core alongside a deployment Q&amp;A that describes the larger system: hardware,
+separate processing stages, routing and cache storage <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>. The code shows how an engine
+advances a request; the Q&amp;A describes how many such engines share the work and
+reach saved state. Together, they let us follow a request beyond the boundary of one
+process.
+</p><p class="indent">   The model gives us another reason to look closely. Its attention design changes
+what a cache row contains. Sharing representations between layers changes which work
+can be omitted. Routing tokens to different experts changes which weights must be
+available on each device. These properties reach into memory allocation, scheduling and
+execution. Reading the model and engine together makes their constraints easier to
+understand.
+</p><p class="indent">   DeepInfer was originally built primarily on vLLM. Its deployment Q&amp;A credits
+SGLang and NanoFlow when describing asynchronous scheduling <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>. If you know
+those systems, familiar names will help you find your bearings. We then ask what
+those names mean here: which design is retained, which behaviour differs, and which
+requirement comes from DeepSeek’s model. Fixed-version comparisons and the authors’ own
+acknowledgements give us evidence for those relationships; a familiar class name alone does
+not.
+                                                                                  
+                                                                                  
+</p>
+<h3 class="likesectionHead" id="what-you-will-be-able-to-follow"><a id="x1-3000"></a>What you will be able to follow</h3>
+<p class="noindent">By the end, you should be able to investigate a pause in generation by locating the work and
+waits that could explain it. You should be able to follow a cache address to its owner and
+determine when that storage can be reused. A throughput curve should lead you back to its
+counting assumptions. A passing test should lead you to the values it compares and the claim its
+assertion actually checks. Together, these skills give you a working understanding of inference
+engines and a route through DeepInfer’s architecture when you want to read further or change
+something.
+</p><p class="indent">   Throughout, we distinguish teaching experiments, inspected implementation, documented
+production architecture and proposals made in this book. We also keep different claims of
+correctness separate. Equal values, values within a tolerance, samples from an intended
+distribution and useful answers each call for a different check. These distinctions matter whenever
+an optimisation changes the order, amount or location of computation.
+</p><p class="indent">   You need familiarity with functions, loops and arrays, and enough Python to read a short
+program. Elementary probability will help with sampling. We introduce attention, device memory
+and distributed execution as the questions require them. Each technical chapter begins with an
+experiment whose result you can predict, then opens a connected path through the source. The
+excerpts are printed beside the explanation, with diagrams and concrete cases to keep track of the
+objects crossing each boundary.
+</p>
+<h3 class="likesectionHead" id="what-you-can-try"><a id="x1-4000"></a>What you can try</h3>
+<p class="noindent">The small Python experiments let you make mistakes cheaply. Release a simulated memory block
+before its queued copy finishes, and another request’s data appears in the copy. Move expert work
+between simulated devices, and check that the answer survives the move. Enumerate a sampling
+rule’s possible outcomes, and see exactly where its output distribution changes. You can
+alter a condition, predict the consequence and check it before returning to the engine
+code.
+</p><p class="indent">   There are twenty-eight experiments. They require Python 3.10 or later; all but one use only
+the standard library. The exception runs DeepInfer’s placement policy with PyTorch on a
+CPU. The experiments, their saved outputs and the source checks are available at
+<a class="url" href="https://github.com/jzstark/inside-deepinfer-code"><code>https://github.com/jzstark/inside-deepinfer-code</code></a>; Appendix <a href="appendix-c.html#ref-app:sources">C</a> explains how the outputs
+were recorded. Assigned costs and simulated clocks expose dependencies and trade-offs; they do
+not measure accelerator performance.
+</p><p class="indent">   The inspected engine release requires Python 3.12 and supports NVIDIA SM100 GPUs with
+CUDA 13, or Huawei Ascend 950 NPUs with CANN 9.2 <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>]</span>. The Q&amp;A recommends 64 prefill
+GPUs plus 64 decode GPUs as the smallest <em>efficient service deployment</em>, rather than a minimum
+for every offline experiment <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. Most readers will therefore study the full engine through source
+walkthroughs.
+</p>
+<h3 class="likesectionHead" id="the-route-through-the-book"><a id="x1-5000"></a>The route through the book</h3>
+<p class="noindent">We begin with one generation loop, then ask what batching saves and what a model must
+remember. Once that state has a size and an owner, we can decide which requests fit, which
+should run next and how host and device work can overlap. Experts spread the computation
+across devices; speculative decoding adds a choice about how much work is worth checking.
+Approximate reconstruction then tests the limits of what cached state can be recovered. The final
+chapters examine the guarantees these choices must meet and the service that connects engines
+to one another and to storage. A closing request trace brings the mechanisms back
+together.
+</p><p class="indent">   The appendices support closer reading. Appendix <a href="appendix-a.html#ref-app:compression">A</a> follows compression and indexing into
+attention. Appendix <a href="appendix-b.html#ref-app:map">B</a> maps README features to source entry points, traces a step’s calls and
+returns, and shows how processes and devices are grouped. Use it whenever a chapter enters an
+unfamiliar part of the repository. Appendix <a href="appendix-c.html#ref-app:sources">C</a> identifies the source edition and explains
+reproduction; a terms table locates definitions.
+</p><p class="indent">   The detailed walkthroughs cover the main runtime mechanisms and selected model-driven
+state paths. Low-precision storage is included; quantisation algorithms and general kernel
+tuning are outside the scope. Ascend kernel internals, vision architecture, checkpoint
+loading and the complete distributed initialisation and recovery paths are not covered
+systematically. Hyper-connections and Engram receive navigation entries rather than full
+derivations. The repository map marks these limits and supplies places to continue
+reading.
+</p><p class="indent">   For now, start with a list of integers. One of them has just been generated, but the prediction
+function has not processed it yet. Keeping track of that small distinction will take us a long way
+into DeepInfer.
+                                                                                  
+                                                                                  
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="index.html"><small>OVERVIEW</small>← About the book and contents</a><a class="next" href="chapter-01.html"><small>NEXT</small>A generation loop →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#why-deepinfer">Why DeepInfer</a><a class="" href="#what-you-will-be-able-to-follow">What you will be able to follow</a><a class="" href="#what-you-can-try">What you can try</a><a class="" href="#the-route-through-the-book">The route through the book</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>
