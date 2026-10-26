@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keep the host and device busy · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link active" href="chapter-06.html" aria-current="page"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 06</p><h1 class="chapterHead" id="keep-the-host-and-device-busy"><a id="x1-830006"></a>Keep the host and device busy</h1>
+<p class="noindent"><a id="ref-ch:overlap"></a>
+</p><p class="indent">   Chapter 1 found two oddities in DeepInfer’s loop. One call to the worker can handle work
+from two steps, and the outer loop must flush a pending step after the scheduler reports no
+unfinished requests. Chapter 5 found a third: a result can arrive for a request that the scheduler
+has already reset. All three come from one design choice. The host plans the next step before it
+has read the result of the current one.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-8">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">The host must choose step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+before it has read step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>’s
+result.    What    can    it    decide    without    that    result?    What    must    the
+device    supply    instead?    When    may    storage    or    metadata    from    step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+be reused? </p>
+</div>
+</div>
+<h3 class="sectionHead" id="overlap-has-a-limit"><span class="titlemark">6.1   </span> <a id="x1-840006.1"></a>Overlap has a limit</h3>
+<p class="noindent">Two parties take part. The <em>host </em>is the CPU process that schedules requests, prepares metadata
+and submits work. The <em>device </em>executes submitted work in order on a queue, called a <em>stream</em>.
+Submitting work and executing it are different events. The host can queue a forward pass and
+move on before the device starts it. Chapter 4 introduced <em>events</em>: markers in the queue that the
+host can wait for.
+</p><p class="indent">   A decode step has two device operations here: a <em>forward </em>pass that evaluates the model, and
+<em>sampling </em>that chooses tokens from its output. The host has four kinds of work: scheduling,
+submission, post-processing of sampled tokens, and engine callbacks. The next forward needs the
+tokens chosen by the previous sample. The question is whether the host must read them
+first.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/13_overlap.py
+</code></pre></div>
+<p class="indent">   The experiment assigns durations to these operations and simulates both
+orders. In the synchronous order, each call submits forward and sampling, waits
+for sampling to finish, then post-processes its own result. The ZOS order follows
+<code>Worker.execute_model_step </code>(<span class="path"><code>worker.py</code></span>, lines 113–189). During decode call
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>, the
+host:
+     </p><ol class="enumerate1">
+<li class="enumerate" id="x1-84002x1">prepares inputs and queues forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>;
+     </li>
+<li class="enumerate" id="x1-84004x2">waits for <code>sample_end_evt </code>of step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>,
+     then post-processes step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>;
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-84006x3">queues sampling for step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     and runs the engine callbacks in <code>pre_sampler_sync</code>;
+     </li>
+<li class="enumerate" id="x1-84008x4">records <code>sample_end_evt </code>for step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     and keeps the step’s state for the next call.</li></ol>
+<p class="noindent">The lab puts forward and sampling on one device queue, so forward
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> cannot start
+before sample <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+finishes even though the host queued it earlier. The worker’s comment at line 231 states that
+ordering for the correction work queued before forward; this chapter’s release table returns to the
+cases where a single queue is assumed rather than shown <span class="cite">[<a href="references.html#Xdeepinfer-worker">7</a>]</span>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Assigned units. interval = repeating step; idle = device idle per step;
+gap = device wait between forward and sample; wait = host wait for sample 3;
+first = first sample end; finish = end of final post-processing.
+case                       mode  interval idle gap wait first finish
+baseline                   sync     20      8      0     10     16    120
+baseline                   ZOS      12      0      0      2     16     80
+slow scheduling            sync     29     17      0     10     25    174
+slow scheduling            ZOS      19      7      0      0     25    120
+long post-processing       sync     30     18      0     10     16    180
+long post-processing       ZOS      20      8      5      0     16    127
+correction before forward  ZOS      13      0      0      3     16     85
+
+Timer view of the baseline: a host timer around 'launch' records 1 unit; the device forward it queued lasts 10.
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/13_overlap.txt">results/13_overlap.txt</a></div></div>
+<figure class="figure"><a id="ref-fig:zos-timeline"></a>
+<p class="noindent" id="-three-baseline-decode-steps-from-labsoverlappy-drawn-from-data-the-script-writes-numbers-name-the-step-in-the-synchronous-run-the-host-waits-for-each-sample-before-postprocessing-it-so-the-device-idles-during-that-work-and-the-next-scheduling-pass-under-zos-forward-n-is-queued-before-the-host-waits-for-sample-n-durations-are-assigned-units-not-measurements"><a aria-label="Open figure at full size" class="figure-image" href="webbook16x.svg" rel="noopener" target="_blank"><img alt="Figure 6.1: Three    baseline    decode    steps    from labs/13_overlap.py ,    drawn
+from   data   the   script   writes.   Numbers   name   the   step.   In   the   synchronous
+run   the   host   waits   for   each   sample   before   post-processing   it,   so   the   device
+idles   during   that   work   and   the   next   scheduling   pass.   Under   ZOS,   forward N + 1 is queued before the host waits for sample N .
+Durations are assigned units, not measurements." loading="lazy" src="webbook16x.svg"/></a>
+<a id="x1-84009r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 6.1:    </span><span class="content">Three    baseline    decode    steps    from    <code>labs/13_overlap.py</code>,    drawn
+from   data   the   script   writes.   Numbers   name   the   step.   In   the   synchronous
+run   the   host   waits   for   each   sample   before   post-processing   it,   so   the   device
+idles   during   that   work   and   the   next   scheduling   pass.   Under   ZOS,   forward
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+is queued before the host waits for sample <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>.
+Durations are assigned units, not measurements.
+</span></figcaption>
+
+</figure>
+<p class="indent">   In the baseline, the device does 12 units of work per step: forward 10 and sampling 2. The
+synchronous run takes 20. Its device is idle for 8 units while the host post-processes (4), schedules
+the next step (3) and submits the next forward (1). The host also waits 10 units for each sample.
+The ZOS run takes 12, the device’s own work, and the host waits only 2. Its ten units of
+host work fit behind the next forward. Figure <a href="chapter-06.html#ref-fig:zos-timeline">6.1</a> draws the first three steps of both
+runs.
+</p><p class="indent">   The other two cases show the limit. When scheduling takes 12 units, the host needs 19 units
+per step, more than the device’s 12. ZOS still helps, from 29 to 19 units, but the device now idles
+for 7 units every step. Overlap can hide host work only behind device work that is already
+queued. In the third case, post-processing takes 14 units. The host cannot queue sample
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> until it has post-processed
+step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>, so the device
+finishes forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> and
+then waits. The gap is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>14</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>10</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>5</mn></mrow></math>
+units: post-processing plus the sampling submission, less the forward. Overlap moved the waiting;
+it did not remove the dependency.
+</p><p class="indent">   The first sample ends at time 16 in both baseline runs. Overlap does not shorten the first step,
+because nothing is queued before it. At the end, the ZOS run must still wait for and post-process
+its pending step, the flush from chapter 1. The step interval describes repeating throughput; the
+fill and the drain are separate costs.
+</p><p class="indent">   One more detail is visible in the code order. The worker records <code>sample_end_evt </code>after the
+callbacks, not immediately after queuing sampling (lines 161–168). The lab models that event as
+complete at the later of the sampling end and its own submission. Waiting for the event can
+therefore take longer than waiting for sampling itself would.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The loop below produces the timeline. <code>work </code>advances the host clock; <code>enqueue </code>starts device
+work at the later of that clock and the end of previously queued work. <code>wait </code>advances the host
+clock only if the event is still pending. The cost keys name scheduling (S), submission (L),
+post-processing (P), callbacks (C), forward (F), sampling (M) and optional correction
+(X):
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.1.</b> Queue the next forward before collecting the previous result.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">38</span><span>    <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">steps</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span>        <span class="n">work</span><span class="p">(</span><span class="s2">"schedule"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"S"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span>        <span class="n">work</span><span class="p">(</span><span class="s2">"launch"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"L"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span>        <span class="n">d2h_done</span> <span class="o">=</span> <span class="n">enqueue</span><span class="p">(</span><span class="s2">"correct"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"X"</span><span class="p">])</span> <span class="k">if</span> <span class="n">zos</span> <span class="ow">and</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"X"</span><span class="p">]</span> <span class="ow">and</span> <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">1</span> <span class="k">else</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span>        <span class="n">enqueue</span><span class="p">(</span><span class="s2">"forward"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"F"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span>        <span class="k">if</span> <span class="n">zos</span> <span class="ow">and</span> <span class="n">n</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span>            <span class="n">wait</span><span class="p">(</span><span class="n">sample_end</span><span class="p">[</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">],</span> <span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>  <span class="c1"># sample_end_evt(N).synchronize()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>            <span class="n">work</span><span class="p">(</span><span class="s2">"post"</span><span class="p">,</span> <span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"P"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span>            <span class="n">wait</span><span class="p">(</span><span class="n">d2h_done</span><span class="p">,</span> <span class="n">n</span><span class="p">)</span>  <span class="c1"># d2h_evt.synchronize() before sampler metadata</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span>        <span class="n">work</span><span class="p">(</span><span class="s2">"launch"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"L"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span>        <span class="n">enqueue</span><span class="p">(</span><span class="s2">"sample"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"M"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">49</span><span>        <span class="n">work</span><span class="p">(</span><span class="s2">"callbacks"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"C"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">50</span><span>        <span class="n">sample_end</span><span class="p">[</span><span class="n">n</span><span class="p">]</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">free</span><span class="p">,</span> <span class="n">t</span><span class="p">)</span>  <span class="c1"># the event is recorded after callbacks</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">51</span><span>        <span class="k">if</span> <span class="ow">not</span> <span class="n">zos</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">52</span><span>            <span class="n">wait</span><span class="p">(</span><span class="n">sample_end</span><span class="p">[</span><span class="n">n</span><span class="p">],</span> <span class="n">n</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">53</span><span>            <span class="n">work</span><span class="p">(</span><span class="s2">"post"</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"P"</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">54</span><span>    <span class="k">if</span> <span class="n">zos</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">55</span><span>        <span class="n">wait</span><span class="p">(</span><span class="n">sample_end</span><span class="p">[</span><span class="n">steps</span><span class="p">],</span> <span class="n">steps</span><span class="p">)</span>  <span class="c1"># final flush of the pending step</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">56</span><span>        <span class="n">work</span><span class="p">(</span><span class="s2">"post"</span><span class="p">,</span> <span class="n">steps</span><span class="p">,</span> <span class="n">costs</span><span class="p">[</span><span class="s2">"P"</span><span class="p">])</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/13_overlap.py">labs/13_overlap.py</a> · lines 38–56</div></div>
+<h4 class="subsectionHead" id="which-interval-does-a-timer-see"><span class="titlemark">6.1.1   </span> <a id="x1-850006.1.1"></a>Which interval does a timer see?</h4>
+<p class="noindent">The last line of the output repeats chapter 2’s warning in a new form. A host timer around a
+submission measures the submission: one unit, while the forward it queued lasts ten.
+<code>CPUTimer.record </code>reads the host clock before and after the caller’s block (<span class="path"><code>timer.py</code></span>, lines 50–63).
+The worker uses it around the wait in post-processing:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.2.</b> Time the wait, then read only completed graph timers.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">262</span><span><span class="k">with</span> <span class="n">cpu_timer</span><span class="o">.</span><span class="n">record</span><span class="p">(</span><span class="s2">"worker.post_process.sync"</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">263</span><span>    <span class="n">step_state</span><span class="o">.</span><span class="n">sample_end_evt</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">264</span><span><span class="k">with</span> <span class="n">cpu_timer</span><span class="o">.</span><span class="n">record</span><span class="p">(</span><span class="s2">"worker.post_process.graph_timer_flush"</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">265</span><span>    <span class="c1"># flush the time of completed graph, no effect on the running graph.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span>    <span class="n">cuda_graph_timer</span><span class="o">.</span><span class="n">flush_out</span><span class="p">()</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L262-L266">deepinfer/worker/worker.py</a> · lines 262–266</div></div>
+<p class="indent">   The first block measures how long the host waited for the device. In the lab’s terms, that is
+the <code>wait </code>column: 2 units per ZOS baseline step and 0 when scheduling is slow. A large wait
+means the host was ahead; a small wait with idle device time means the host was behind. Device
+timing comes from recorded events instead. <code>CUDAGraphTimer.flush_out </code>waits for each recorded
+pair before reading its elapsed time (lines 196–212), and the comment notes that only completed
+graphs are flushed. Neither kind of timer includes a request’s queueing or delivery; chapter 2’s
+boundaries still apply <span class="cite">[<a href="references.html#Xdeepinfer-timer">46</a>]</span>.
+</p>
+<h3 class="sectionHead" id="one-request-crosses-two-steps"><span class="titlemark">6.2   </span> <a id="x1-860006.2"></a>One request crosses two steps</h3>
+<p class="noindent">Chapter 1 identified the asynchronous-scheduling precedents acknowledged by the deployment
+Q&amp;A. The idea carried forward is to overlap host preparation with device execution. The question
+here is how DeepInfer makes that overlap work when the host’s information is a step behind. Its
+implementation matches rows by request identity, supplies tokens and length corrections on the
+device, and retains results and metadata until their readers are finished. The next sections trace
+those obligations. They explain this implementation’s choices without claiming that row
+remapping or deferred release originated here.
+</p><p class="indent">   Overlap has a price in information. When the host schedules step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>, step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+is still running. The host does not yet know which token step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> will sample.
+If step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+verified draft tokens, it does not know how many were accepted. The device knows both soon
+after sampling, and the next forward runs on the device. DeepInfer therefore lets the device
+complete the host’s one-step-old metadata.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/14_lagging_metadata.py
+</code></pre></div>
+<p class="indent">   The experiment translates the inspected matching code and correction formula into lists. It builds
+a batch of four requests and checks the corrected inputs against a synchronous reference that already
+knows step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>’s
+                                                                                  
+                                                                                  
+result. We add one missing fact at a time.
+</p>
+<h4 class="subsectionHead" id="the-missing-token"><span class="titlemark">6.2.1   </span> <a id="x1-870006.2.1"></a>The missing token</h4>
+<p class="noindent">Begin without draft tokens (<code>nextn=0</code>). Each request evaluates one position per step,
+so the scheduler knows the length exactly. It lacks only the input token, which step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> is still
+sampling.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>A. missing token, same order: nextn=0, total_q=4, rows with padding=4, same-order path
+  id remap q k_cpu base corrected true  inputs
+  11     0 1    33   33        33   33  [501]
+  12     1 1    34   34        34   34  [502]
+  13     2 1    35   35        35   35  [503]
+  14     3 1    36   36        36   36  [504]
+
+B. reordered survivors and a new request: nextn=0, total_q=4, rows with padding=4, seq_id map
+  id remap q k_cpu base corrected true  inputs
+  13     2 1    35   35        35   35  [503]
+  11     0 1    33   33        33   33  [501]
+  15    -1 1    41   41        41   41  [515]
+  12     1 1    34   34        34   34  [502]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/14_lagging_metadata.txt">results/14_lagging_metadata.txt</a></div></div>
+<p class="indent">   Rows are matched by <code>seq_id</code>, a stable request identifier, not by position in
+the batch. The <code>remap </code>column gives the matching row of the previous batch, or
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math> when there is
+none. A matched row reads its input token from the previous sample’s output on the device. Request 15 was
+not in step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>;
+the host already knows its token, 515, and supplies it. In the second batch the survivors have
+been reordered, as chapter 5’s length sort can do, and request 14 has left. The order changed, but
+every matched row still finds its token. The corrected and synchronous key lengths agree because
+nothing about length was missing.
+</p>
+<h4 class="subsectionHead" id="the-missing-accepted-length"><span class="titlemark">6.2.2   </span> <a id="x1-880006.2.2"></a>The missing accepted length</h4>
+<p class="noindent">Now let each request verify two draft tokens per step (<code>nextn=2</code>), so each step
+evaluates three positions. After verification, a request keeps its main token plus
+the accepted drafts. The host cannot know that number while scheduling step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>.
+</p><p class="indent">   The scheduler reserves the maximum. When it schedules a request, it records the step’s query
+length as in flight (<span class="path"><code>scheduler.hpp</code></span>, line 726). The next step’s key length is the committed count
+plus in-flight positions plus the new query length (line 697). That is an upper bound
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>C. missing accepted length, EOS and graph padding: nextn=2, total_q=12, rows with padding=8, same-order path
+  id remap q k_cpu base corrected true  inputs
+  11     0 3    37   34        35   35  [601, 611, 612]
+  12     1 3    38   35        37   37  [2, 621, 622]
+  13     2 3    39   36        39   39  [603, 631, 632]
+  14     3 3    40   37        40   40  [604, 641, 642]
+  evaluated although step N sampled EOS: [12]; their step N+1 output is not published
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/14_lagging_metadata.txt">results/14_lagging_metadata.txt</a></div></div>
+<p class="indent">   Follow request 11. It had 31 committed positions before step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>. Step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> reserved 3
+and step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> asks
+for 3, so the host’s key length is 37. With drafts enabled, the C++ preparation subtracts the current
+query length, giving a base of 34 (<span class="path"><code>zos.cpp</code></span>, line 188). The device then applies the reference formula. For
+real row <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math> with
+remap <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>r</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math> and
+query length <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>q</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>,
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msubsup><mrow>
+<mi>k</mi></mrow><mrow><mi>i</mi></mrow><mrow><mi>′</mi></mrow></msubsup> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>k</mi></mrow><mrow><mstyle mathvariant="normal">
+<mi>base</mi></mstyle><mo class="MathClass-punc" stretchy="false">,</mo><mi>i</mi></mrow></msub><mo class="MathClass-bin" stretchy="false">+</mo><msub><mrow><mi>q</mi></mrow><mrow><mi>i</mi></mrow></msub><mo class="MathClass-bin" stretchy="false">−</mo><mrow><mo fence="true" form="prefix"> {</mo><mrow> <mtable align="axis" class="array" columnlines="none" displaystyle="true" equalcolumns="false" equalrows="false" style=""> <mtr class="array-row"><mtd class="array-td" columnalign="left"><mstyle class="text"><mtext class="texttt" mathvariant="monospace">nextn</mtext></mstyle><mo class="MathClass-bin" stretchy="false">−</mo> <msub><mrow><mi>a</mi></mrow><mrow><msub><mrow><mi>r</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="quad" width="1em"></mspace></mtd><mtd class="array-td" columnalign="left"><msub><mrow><mi>r</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">≥</mo> <mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo> </mtd>
+</mtr> </mtable> </mrow><mo fence="true" form="postfix"></mo></mrow>
+</mrow></math></td></tr></table></div>
+<p class="indent">   where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>a</mi></mrow><mrow><msub><mrow><mi>r</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></msub></mrow></math> counts
+the drafts accepted in the matched previous row, excluding the main token. Request 11 accepted none:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>34</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>3</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mo class="MathClass-open" stretchy="false">(</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>0</mn><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>35</mn></mrow></math>. The synchronous reference
+agrees: <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>31</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>32</mn></mrow></math> committed
+positions after step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>,
+plus three new queries. Request 13 accepted both drafts, so its reserved length was already right:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>36</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>3</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>0</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>39</mn></mrow></math>. The base exists so that
+the formula does not add <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math>
+twice <span class="cite">[<a href="references.html#Xdeepinfer-zos">40</a>, <a href="references.html#Xdeepinfer-seqlens-k">43</a>]</span>.
+</p><p class="indent">   The input tokens change too. A matched row’s first input is the token sampled in step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>; the remaining inputs are
+the new drafts that step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+proposed. Request 12 shows a further consequence. Its step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> sample
+is the end-of-sequence token, number 2 here. The host learns this only when it post-processes step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>, after forward
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> has been
+queued. Step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+therefore evaluates request 12 anyway. Evaluation and publication are separate: the row can be
+computed, but its result will not be returned to the user. Section <a href="chapter-06.html#ref-sec:eos">6.4</a> follows that row to the end
+of its life.
+</p><p class="indent">   The batch has 12 query positions, so the worker selects a captured graph for 16 positions and
+adds four padding rows. There are now eight metadata rows: four real requests with three positions
+each, and four padding rows with one position each. The script checks that the padding rows keep
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>k</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn></mrow></math> and
+remap <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>:
+the correction applies only to the first <code>n_seq </code>real rows. Section <a href="chapter-06.html#ref-sec:graphs">6.5</a> explains the padding.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The lab computes the inputs and lengths with this list calculation. It visits only the real <code>rows</code>,
+leaving padding unchanged, and checks the results against a separate reference based on the
+known accepted counts:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.3.</b> Translate token selection and length correction into lists.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">63</span><span><span class="k">def</span> <span class="nf">correct</span><span class="p">(</span><span class="n">rows</span><span class="p">,</span> <span class="n">prev</span><span class="p">,</span> <span class="n">remap</span><span class="p">,</span> <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">nextn</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">64</span><span>    <span class="n">inputs</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">65</span><span>    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">row</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">rows</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">66</span><span>        <span class="n">old</span> <span class="o">=</span> <span class="n">prev</span><span class="p">[</span><span class="n">remap</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span> <span class="k">if</span> <span class="n">remap</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="k">else</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">67</span><span>        <span class="n">inputs</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">row</span><span class="o">.</span><span class="n">fresh</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="k">if</span> <span class="n">old</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">68</span><span>                       <span class="n">old</span><span class="o">.</span><span class="n">sampled</span> <span class="k">if</span> <span class="n">j</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="n">old</span><span class="o">.</span><span class="n">drafts</span><span class="p">[</span><span class="n">j</span> <span class="o">-</span> <span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">q</span><span class="p">[</span><span class="n">i</span><span class="p">])])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">69</span><span>        <span class="k">if</span> <span class="n">nextn</span><span class="p">:</span>  <span class="c1"># worker.py:220-227; padded rows are left unchanged</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">70</span><span>            <span class="n">k</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+=</span> <span class="n">q</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">-</span> <span class="p">(</span><span class="n">nextn</span> <span class="o">-</span> <span class="n">old</span><span class="o">.</span><span class="n">accepted</span> <span class="k">if</span> <span class="n">old</span> <span class="k">else</span> <span class="mi">0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">71</span><span>    <span class="k">return</span> <span class="n">inputs</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/14_lagging_metadata.py">labs/14_lagging_metadata.py</a> · lines 63–71</div></div>
+
+<h4 class="subsectionHead" id="a-query-length-chosen-on-the-device"><span class="titlemark">6.2.3   </span> <a id="x1-890006.2.3"></a>A query length chosen on the device</h4>
+<p class="noindent">Chapter 8 adds a third unknown. With variable-length verification, the number of drafts each
+request verifies depends on confidence estimates from the previous sample. The host fixes only the
+step’s total query length; the device divides it among requests. Chapter 8 describes that
+allocation. Here only its dependency matters. The sampler’s host metadata needs the per-request
+lengths, which now exist only on the device. A non-blocking copy returns them to pinned host
+memory, and the host must wait for the copy’s event, <code>d2h_evt</code>, before updating that metadata
+(<span class="path"><code>worker.py</code></span>, lines 146–152).
+</p><p class="indent">   The last row of lab 13 adds this case as a one-unit correction queued before forward. It runs after
+sample <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> and
+before forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+on the same stream. Its event is therefore complete soon after the host’s existing wait for sample
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>; the
+step lengthens by the correction’s device time, from 12 to 13 units. That result depends on the
+assigned durations. The code establishes only the order.
+</p>
+<h3 class="sectionHead" id="read-the-correction-path"><span class="titlemark">6.3   </span> <a id="x1-900006.3"></a>Read the correction path</h3>
+<p class="noindent">The correction happens in <code>Worker._correct_seqlens_qk</code>, called before forward when the worker
+has a previous decode step. It first builds the host-side inputs:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.4.</b> Match the batches, then copy the host arrays to the device.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">209</span><span><span class="n">remap_cpu</span><span class="p">,</span> <span class="n">seqlens_q_cpu</span><span class="p">,</span> <span class="n">seqlens_k_cpu</span><span class="p">,</span> <span class="n">has_overlap</span> <span class="o">=</span> <span class="n">prepare_zos_inputs</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">210</span><span>    <span class="n">seq_metadata_list</span><span class="p">,</span> <span class="n">prev</span><span class="o">.</span><span class="n">seq_metadata_list</span><span class="p">,</span> <span class="n">n_seq_with_padding</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">nextn</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">211</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">212</span><span><span class="k">if</span> <span class="ow">not</span> <span class="n">has_overlap</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">213</span><span>    <span class="k">return</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">214</span><span><span class="n">remap</span> <span class="o">=</span> <span class="n">remap_cpu</span><span class="o">.</span><span class="n">cuda</span><span class="p">(</span><span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">215</span><span><span class="n">seqlens_q</span> <span class="o">=</span> <span class="n">seqlens_q_cpu</span><span class="o">.</span><span class="n">cuda</span><span class="p">(</span><span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">216</span><span><span class="n">seqlens_k</span> <span class="o">=</span> <span class="n">seqlens_k_cpu</span><span class="o">.</span><span class="n">cuda</span><span class="p">(</span><span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L209-L216">deepinfer/worker/worker.py</a> · lines 209–216</div></div>
+<p class="indent"> <code>prepare_zos_inputs </code>first tries the cheap case. If both batches have the same length and the same <code>seq_id </code>at
+every position, row <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math>
+matches row <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math>
+(<span class="path"><code>zos.cpp</code></span>, lines 148–157). Otherwise it builds a map:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.5.</b> Match by request identity when the order has changed.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">159</span><span><span class="kt">bool</span><span class="w"> </span><span class="n">has_overlap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">same_order</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">seq_metadata_list</span><span class="p">.</span><span class="n">empty</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">160</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">same_order</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">161</span><span><span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unordered_map</span><span class="o">&lt;</span><span class="kt">int64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">prev_indices</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">162</span><span><span class="w">    </span><span class="n">prev_indices</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">prev_seq_metadata_list</span><span class="p">.</span><span class="n">size</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">163</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int32_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">prev_seq_metadata_list</span><span class="p">.</span><span class="n">size</span><span class="p">());</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">164</span><span><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">prev_seq_metadata_list</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">is_placeholder</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">165</span><span><span class="w">            </span><span class="n">prev_indices</span><span class="p">.</span><span class="n">insert_or_assign</span><span class="p">(</span><span class="n">prev_seq_metadata_list</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">seq_id</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">166</span><span><span class="w">        </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">167</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">168</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int32_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq_metadata_list</span><span class="p">.</span><span class="n">size</span><span class="p">());</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">169</span><span><span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">prev</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev_indices</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">seq_metadata_list</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">seq_id</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">170</span><span><span class="w">        </span><span class="n">remap_indices</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">prev</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">prev_indices</span><span class="p">.</span><span class="n">end</span><span class="p">()</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">-1</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">prev</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">171</span><span><span class="w">        </span><span class="n">has_overlap</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">remap_indices</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">172</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">173</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">174</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">has_overlap</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">175</span><span><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">std</span><span class="o">::</span><span class="n">nullopt</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">nullopt</span><span class="p">,</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">nullopt</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">};</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">176</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L159-L176">csrc/engine/zos.cpp</a> · lines 159–176</div></div>
+<p class="indent">   Placeholder rows from the previous step are excluded; they carry no request. If no row
+matches, the function returns nothing and the worker skips correction. The host then has
+complete information for every row in the batch. The function next writes the arrays that the
+device will correct:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.6.</b> Write base lengths for real rows and fixed values for padding.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">184</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int32_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq_metadata_list</span><span class="p">.</span><span class="n">size</span><span class="p">());</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">185</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="o">*</span><span class="n">seq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_metadata_list</span><span class="p">[</span><span class="n">i</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">186</span><span><span class="w">    </span><span class="n">remap_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">remap_indices</span><span class="p">[</span><span class="n">i</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">187</span><span><span class="w">    </span><span class="n">seqlens_q_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">188</span><span><span class="w">    </span><span class="n">seqlens_k_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">seqlen_k</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">nextn</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">189</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">190</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq_metadata_list</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">n_seq_with_padding</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">191</span><span><span class="w">    </span><span class="n">remap_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">192</span><span><span class="w">    </span><span class="n">seqlens_q_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">193</span><span><span class="w">    </span><span class="n">seqlens_k_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">194</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L184-L194">csrc/engine/zos.cpp</a> · lines 184–194</div></div>
+<p class="indent">   Line 188 is the subtraction that defines the base. Lines 190–194 fill the padding rows that the
+lab checked. Back in <code>_correct_seqlens_qk</code>, the worker queues length correction before calling
+<code>execute_main_model</code>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.7.</b> Correct lengths on the device; copy query lengths back if they vary.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">218</span><span><span class="k">if</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_ENABLE_MTP_VARLEN</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">219</span><span>    <span class="n">compute_seqlens_q_by_confidence_rates</span><span class="p">(</span><span class="n">total_q</span><span class="p">,</span> <span class="n">remap</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">],</span> <span class="n">prev</span><span class="o">.</span><span class="n">sampler_output</span><span class="o">.</span><span class="n">confidence_rates_gpu</span><span class="p">,</span> <span class="n">seqlens_q</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">220</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">nextn</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">221</span><span>    <span class="n">compute_seqlens_k_zos</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">222</span><span>        <span class="n">seqlens_k</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">223</span><span>        <span class="n">seqlens_q</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">224</span><span>        <span class="n">remap</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">225</span><span>        <span class="n">prev</span><span class="o">.</span><span class="n">sampler_output</span><span class="o">.</span><span class="n">num_accepted_tokens_gpu</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">226</span><span>        <span class="n">nextn</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">nextn</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">227</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">228</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">229</span><span><span class="n">d2h_evt</span> <span class="o">=</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">230</span><span><span class="k">if</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_ENABLE_MTP_VARLEN</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">231</span><span>    <span class="c1"># H2D, correction, and D2H are ordered on the current stream; only varlen rewrites this pinned source.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">232</span><span>    <span class="n">seqlens_q_cpu</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">]</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">seqlens_q</span><span class="p">[:</span><span class="n">n_seq</span><span class="p">],</span> <span class="n">non_blocking</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">233</span><span>    <span class="n">d2h_evt</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">Event</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">234</span><span>    <span class="n">d2h_evt</span><span class="o">.</span><span class="n">record</span><span class="p">()</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L218-L234">deepinfer/worker/worker.py</a> · lines 218–234</div></div>
+<p class="indent">   The first branch is chapter 8’s allocation; the second is the key-length formula. Both slice to
+<code>n_seq</code>, leaving padding untouched. The comment states the ordering that lab 13 assumed: the
+host-to-device copy, the correction and the return copy are all queued on the current stream,
+ahead of forward. The kernel’s arithmetic has a reference implementation in the same
+module:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.8.</b> The reference arithmetic behind the fused kernel.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">44</span><span><span class="n">seqlens_k</span> <span class="o">+=</span> <span class="n">seqlens_q</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span><span class="n">mask</span> <span class="o">=</span> <span class="n">remap</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span>  <span class="c1"># [n_seq] bool</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span><span class="c1"># Clamp remap to valid index (use 0 for fresh seqs, will be masked out)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span><span class="n">remap_clamped</span> <span class="o">=</span> <span class="n">remap</span><span class="o">.</span><span class="n">clamp</span><span class="p">(</span><span class="nb">min</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>  <span class="c1"># [n_seq]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span><span class="c1"># Gather prev_num_accepted_tokens for all seqs (invalid ones get tokens[0], doesn't matter)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">49</span><span><span class="n">accepted</span> <span class="o">=</span> <span class="n">prev_num_accepted_tokens</span><span class="p">[</span><span class="n">remap_clamped</span><span class="o">.</span><span class="n">long</span><span class="p">()]</span>  <span class="c1"># [n_seq]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">50</span><span><span class="c1"># Compute adjustment: only apply where mask is True</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">51</span><span><span class="n">adjustment</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">mask</span><span class="p">,</span> <span class="n">nextn</span> <span class="o">-</span> <span class="n">accepted</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">seqlens_k</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">52</span><span><span class="n">seqlens_k</span> <span class="o">-=</span> <span class="n">adjustment</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compute_seqlens_k_zos.py#L44-L52">deepinfer/model_executor/layers/tilelang_ops/compute_seqlens_k_zos.py</a> · lines 44–52</div></div>
+<p class="indent">   Lab 14 translates these lines. Scenarios A and B check matching and fresh inputs without
+drafts; scenario C checks accepted-length correction for matched requests and leaves padding
+unchanged. Fresh requests with drafts are not exercised. These checks do not run the kernel or
+test its handling of real tensor layouts <span class="cite">[<a href="references.html#Xdeepinfer-seqlens-k">43</a>]</span>.
+</p><p class="indent">   Model input preparation then uses the corrected query lengths to decide which token
+positions to gather. Fresh rows get their tokens from the host (<span class="path"><code>zos.cpp</code></span>, lines 99–113);
+matched rows read the previous outputs on the device. The gather’s docstring states both
+branches:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.9.</b> Matched rows read the previous outputs; fresh rows read host tokens.</div><div class="code-tools"><span>TEXT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>"""Gather input_ids from fresh_tokens or prev sampled/predict tokens.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>For each (seq i, token j) with j &lt; seqlens_q[i], let q_base = cu_seqlens_q[i-1]</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>(0 for i == 0):</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>    if remap[i] &gt;= 0 (old seq):</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>        j == 0: out[q_base+j] = prev_sampled_token_ids[remap[i]]</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>        j &gt;  0: out[q_base+j] = prev_predict_token_ids[remap[i], j-1]</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>    else (fresh seq):</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>        out[q_base+j] = fresh_tokens[i, j]</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>"""</span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/gather_input_ids_zos.py#L21-L30">deepinfer/model_executor/layers/tilelang_ops/gather_input_ids_zos.py</a> · lines 21–30</div></div>
+<p class="indent"> <code>prepare_token_ids_zos </code>calls this gather when a remap exists, passing the corrected
+<code>seqlens_q </code>(<span class="path"><code>prepare_tensor_input_zos.py</code></span>, lines 235–241). For matched rows, the previous
+step’s sampled token and new drafts reach the next forward without a round trip through the
+host <span class="cite">[<a href="references.html#Xdeepinfer-zos">40</a>, <a href="references.html#Xdeepinfer-zos-tokens">42</a>]</span>.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="two-sets-of-metadata-describe-one-step"><span class="titlemark">6.3.1   </span> <a id="x1-910006.3.1"></a>Two sets of metadata describe one step</h4>
+<p class="noindent">The corrected lengths feed forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>.
+Sampling for step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+needs host-side metadata too, and it is prepared later. By the time the worker reaches it, it has post-processed step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>, so each sequence’s committed
+count now includes step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>’s
+accepted tokens. <code>update_metadata_for_sampling_zos </code>uses that count:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.10.</b> Rebuild sampling lengths from the newly committed count.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">299</span><span><span class="n">metadata</span><span class="o">-&gt;</span><span class="n">seqlen_k</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">metadata</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">num_tokens</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">300</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">remap_ptr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">301</span><span><span class="w">    </span><span class="n">metadata</span><span class="o">-&gt;</span><span class="n">refresh_for_sampling</span><span class="p">(</span><span class="n">seq</span><span class="p">,</span><span class="w"> </span><span class="n">nextn</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">302</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">303</span><span><span class="n">scheduler_outputs</span><span class="p">.</span><span class="n">seqlens_q</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">metadata</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="p">;</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp#L299-L303">csrc/engine/zos.cpp</a> · lines 299–303</div></div>
+<p class="indent">   The comment above, line 298, explains the choice in the author’s translation: an extra forward
+after end-of-sequence may not have appended its token to the sequence, so sampling uses the
+cached length. Request 12 in lab 14 is such a case. Matched rows also refresh their draft and
+sampling inputs from the sequence. Forward metadata and sampling metadata both describe step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>, but
+they become valid at different times and from different sources: the device correction, then the
+host’s committed count <span class="cite">[<a href="references.html#Xdeepinfer-zos">40</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="when-the-correction-does-not-run"><span class="titlemark">6.3.2   </span> <a id="x1-920006.3.2"></a>When the correction does not run</h4>
+<p class="noindent">ZOS is on by default only for some engine types: <code>NORMAL </code>and <code>COMPLETION</code>, not <code>PROMPT</code>
+(<span class="path"><code>engine_type.py</code></span>, lines 16–17). <code>EngineArgs </code>applies that default with <code>os.environ.setdefault</code>,
+so an existing <span class="path"><code>DEEPINFER_ZERO_OVERHEAD_SCHEDULING</code></span> setting wins (<span class="path"><code>arg_utils.py</code></span>, lines 51–55).
+Prompt steps always post-process their own result in the same call; chapter 1 printed that branch.
+A prompt step can still post-process a preceding decode step, because that happens
+earlier in the call. Correction returns early when there is no previous state, when the
+previous step was a placeholder, or when no row matches (<span class="path"><code>worker.py</code></span>, lines 198–213)
+<span class="cite">[<a href="references.html#Xdeepinfer-engine-type">44</a>, <a href="references.html#Xdeepinfer-engine-args">39</a>, <a href="references.html#Xdeepinfer-worker">7</a>]</span>.
+</p>
+<h3 class="sectionHead" id="last-use-reuse-and-the-cost-of-endofsequence"><span class="titlemark">6.4   </span> <a id="x1-930006.4"></a>Last use, reuse and the cost of end-of-sequence</h3>
+<p class="noindent"><a id="ref-sec:eos"></a>
+</p><p class="indent">   Request 12 sampled its end-of-sequence token in step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>.
+Follow it through three consecutive decode calls:
+     </p><ol class="enumerate1">
+<li class="enumerate" id="x1-93002x1">Call <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+     queues the forward and the sample that choose the end-of-sequence token. The host
+     has not read it.
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-93004x2">Call <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     schedules request 12 again and queues forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     with its row. It then post-processes step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>,
+     which marks the request finished and publishes its last token.  Sampling for step
+     <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     still includes the row.
+     </li>
+<li class="enumerate" id="x1-93006x3">Call <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn></mrow></math>
+     begins with scheduling. <code>free_finished_seqs </code>removes the finished request from the
+     running list and hands it on as finished (<span class="path"><code>scheduler.hpp</code></span>, lines 562 and 752–763).
+     Forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn></mrow></math>
+     no longer includes it. Post-processing step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+     waits for its sampling event and skips the finished row (lines 905–913). <code>pre_sampler_sync</code>
+     then releases its storage:</li></ol>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 6.11.</b> Finished requests return their storage after the wait.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">844</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine_type</span> <span class="ow">in</span> <span class="p">[</span><span class="n">EngineType</span><span class="o">.</span><span class="n">COMPLETION</span><span class="p">,</span> <span class="n">EngineType</span><span class="o">.</span><span class="n">NORMAL</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">845</span><span>    <span class="k">for</span> <span class="n">seq</span> <span class="ow">in</span> <span class="n">scheduler_outputs</span><span class="o">.</span><span class="n">finished_seqs</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">846</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">finalize_seq</span><span class="p">(</span><span class="n">seq</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L844-L846">deepinfer/engine/llm_engine.py</a> · lines 844–846</div></div>
+<p class="indent"> <code>finalize_seq </code>calls the scheduler’s <code>free_seq </code>(lines 804–806), which chapter 4 followed
+into the block allocator. The last device access to request 12’s storage belongs to step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>.
+The worker waited for that step’s sampling event earlier in call
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn></mrow></math>, so the
+release follows the last use <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+</p><p class="indent">   The trace assumes consecutive decode calls. A prefill step in between changes when the decode
+cleanup pass runs, so the release point needs a separate trace.
+</p><p class="indent">   The extra row is the price of not waiting. Each finished request is evaluated once
+more after its last published token. As an illustration, suppose there are no drafts and
+each decode step produces one useful token. If answers averaged 200 tokens, one extra
+evaluation per answer would add about 0.5 per cent to decode rows, ignoring the first token
+produced by prefill. That figure is arithmetic, not a measurement. With drafts, both the
+number of normal decode steps and the number of positions in the extra step change.
+Chapter 5’s stale-result guard is the same idea applied to a request preempted while its
+step was in flight, and chapter 1’s final flush drains the one step that no later call will
+collect.
+</p>
+<h4 class="subsectionHead" id="what-makes-a-release-safe"><span class="titlemark">6.4.1   </span> <a id="x1-940006.4.1"></a>What makes a release safe</h4>
+<p class="noindent">Chapter 4’s second lab released a block while a queued copy still needed it, and a new writer
+corrupted the copy. That lab did not prove that every release after submission is unsafe. The
+governing condition is narrower: a conflicting use by a new owner must follow the last access
+by the old owner. A host can meet it by waiting for an event. It can also rely on an
+order that is guaranteed some other way, such as two operations on the same stream.
+Allocator reuse, the lifetime of host objects and the publication of a result are different
+                                                                                  
+                                                                                  
+questions, and DeepInfer answers them differently. Table <a href="chapter-06.html#ref-tab:release">6.1</a> lists the release points met so
+far.
+</p>
+<div class="table">
+<figure class="float" id="-release-points-and-the-condition-that-permits-reuse-only-the-first-row-lacks-a-complete-argument-in-the-inspected-source"><a id="ref-tab:release"></a>
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-12"><colgroup id="TBL-12-1g"><col id="TBL-12-1"/><col id="TBL-12-2"/></colgroup><tr id="TBL-12-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Resource
+or
+release</span> </p></td><td class="td10" id="TBL-12-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Condition
+  that
+  permits
+  reuse</span> </p></td>
+</tr><tr id="TBL-12-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Preempted
+KV
+blocks</span> </p></td><td class="td10" id="TBL-12-2-2" style="text-align:left;"> <p class="noindent"><code>_preempt
+ </code><span class="ec-lmr-10">returns
+  allocations
+  at
+  once,
+  while
+  an
+  earlier
+  step
+  may
+  still
+  be
+  in
+  flight.
+  Same-stream
+  order
+  is
+  a
+  plausible
+  explanation
+  for
+  safe
+  reuse,
+  not
+  a
+  complete
+  proof
+  here;
+  it
+  needs
+  the
+  audit
+  below.</span> </p></td>
+</tr><tr id="TBL-12-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Finished
+request</span> </p></td><td class="td10" id="TBL-12-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">In
+  consecutive
+  decode
+  calls,
+  the
+  worker
+  has
+  waited
+  for
+  the
+  extra
+  step’s
+  sampling
+  event
+  before
+  </span><code>finalize_seq
+ </code><span class="ec-lmr-10">releases
+  storage.</span> </p></td>
+</tr><tr id="TBL-12-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Fork
+copy
+source</span> </p></td><td class="td10" id="TBL-12-4-2" style="text-align:left;"> <p class="noindent"><code>clone_done_evt
+ </code><span class="ec-lmr-10">completes
+  before
+  the
+  source’s
+  pin
+  is
+  dropped
+  (chapter
+  4).</span> </p></td>
+</tr><tr id="TBL-12-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Output
+pool</span> </p></td><td class="td10" id="TBL-12-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Returned
+  addresses
+  stay
+  valid
+  for
+  the
+  caller
+  until
+  the
+  next
+  release
+  phase;
+  the
+  caller
+  must
+  clone
+  what
+  it
+  keeps
+  (chapter
+  1).
+  This
+  is
+  a
+  host-facing
+  contract,
+  not
+  a
+  device
+  event
+  condition.</span> </p></td>
+</tr><tr id="TBL-12-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-6-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Sequence
+metadata</span> </p></td><td class="td10" id="TBL-12-6-2" style="text-align:left;"> <p class="noindent"><code>WorkerStepState
+ </code><span class="ec-lmr-10">keeps
+  it
+  until
+  post-processing.
+  </span><code>LLMEngine.post_process
+ </code><span class="ec-lmr-10">then
+  collects
+  it
+  for
+  deferred
+  release
+  (line
+  1013);
+  </span><code>DeferredRelease.release
+ </code><span class="ec-lmr-10">returns
+  it
+  to
+  the
+  pool
+  in
+  </span><code>pre_sampler_sync
+ </code><span class="ec-lmr-10">(lines
+  100–103).</span> </p></td>
+</tr><tr id="TBL-12-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-7-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Borrowed
+scheduler
+lists</span> </p></td><td class="td10" id="TBL-12-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The
+  copy
+  and
+  zero
+  lists
+  must
+  be
+  consumed
+  before
+  the
+  next
+  scheduling
+  call
+  clears
+  and
+  reuses
+  their
+  storage
+  (</span><span class="path"><code>scheduler.hpp</code></span><span class="ec-lmr-10">,
+  lines
+  279–284).</span> </p></td>
+</tr><tr id="TBL-12-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-12-8-1" style="text-align:left;"></td></tr></table></div>
+<a id="x1-94001r1"></a>
+<figcaption class="caption"><span class="id">Table 6.1: </span><span class="content">Release points and the condition that permits reuse. Only the first row lacks a
+complete argument in the inspected source.
+</span></figcaption>
+
+</figure>
+</div>
+<p class="indent">   The first row remains open. A complete argument must account for every access to the reused
+cache: eager forward, graph replay, draft execution, copies and zeroing, and any storage
+hooks. Graph capture uses its own stream with explicit waits (<span class="path"><code>cuda_graph_runner.py</code></span>,
+lines 100–137); that fact alone neither proves nor disproves safe runtime reuse. The
+release’s storage hooks are empty, so they say nothing about the unreleased service. Until
+that audit is done, the first row is a scoped inference from the inspected control flow
+<span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-zos-state">41</a>, <a href="references.html#Xdeepinfer-graph">45</a>]</span>.
+</p>
+<h3 class="sectionHead" id="graphs-constrain-the-input-buffers"><span class="titlemark">6.5   </span> <a id="x1-950006.5"></a>Graphs constrain the input buffers</h3>
+<p class="noindent"><a id="ref-sec:graphs"></a>
+</p><p class="indent">   A <em>CUDA graph </em>records a fixed sequence of device operations, with fixed shapes and buffer
+addresses, so that the host can later replay it with one submission. Fewer submissions mean
+less host work per step, which lab 13 showed to be the limit on overlap. The cost is
+rigidity.
+</p><p class="indent">   DeepInfer captures graphs for a list of batch sizes: powers of two up to an interval,
+then multiples of that interval, with a default interval of 8 (<span class="path"><code>cuda_graph_runner.py</code></span>,
+lines 41–51; <span class="path"><code>environ.py</code></span>, line 155). The largest size is <code>max_num_seqs </code>times
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">nextn</mtext></mstyle></mrow></math>, and
+<code>PROMPT </code>engines do not use decode graphs (<span class="path"><code>model_runner.py</code></span>, lines 72–79). Selection uses
+<code>total_q</code>, the number of query positions, not the number of requests (<span class="path"><code>cuda_graph_runner.py</code></span>,
+lines 143–148). Chapter 2’s distinction between requests and positions decides which graph runs.
+The worker adds padding rows to reach the selected size (<span class="path"><code>worker.py</code></span>, lines 202–207). Lab 14’s 12
+positions became 16.
+</p><p class="indent">   The graph’s inputs must also be where it expects them. Under ZOS, the runner is built with
+device-side input storage (<span class="path"><code>model_runner.py</code></span>, line 78), and the graph data’s docstring says that
+source tensors share device storage in that mode (<span class="path"><code>cuda_graph_runner.py</code></span>, lines 26–31). The
+corrections in this chapter therefore write into buffers that replay reads. Correcting a host copy
+instead would require the host to read the previous result first, which is the wait ZOS was built to
+avoid <span class="cite">[<a href="references.html#Xdeepinfer-graph">45</a>]</span>.
+</p><p class="indent">   We can now label each piece of state by the step that produced it, the event or stream order
+that allows the next read, and the condition that allows reuse. The next chapter spreads this work
+across devices, where a step must also wait for other devices.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next5"><span class="titlemark">6.6   </span> <a id="x1-960006.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-96002x1">In <span class="path"><code>labs/13_overlap.py</code></span>, find the smallest post-processing cost that creates a gap
+     between forward and sample in the ZOS run. Derive it from the other durations before
+     running the script.
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-96004x2">Set the forward duration to 2 and keep the baseline host costs. Which side limits the
+     ZOS interval? What would graph replay need to reduce to help?
+     </li>
+<li class="enumerate" id="x1-96006x3">In <span class="path"><code>labs/14_lagging_metadata.py</code></span>, give request 14 an accepted count of 0 in scenario
+     C. Predict its base, corrected and true key lengths.
+     </li>
+<li class="enumerate" id="x1-96008x4">Mark one previous row as a placeholder in scenario B. Translate the placeholder check
+     from <span class="path"><code>zos.cpp</code></span>, lines 151 and 164, into the lab, then predict which rows match.
+     </li>
+<li class="enumerate" id="x1-96010x5">For one row of the release table, list every access you would need to find to turn its
+     condition into a proof. Separate device accesses from host object lifetimes.</li></ol>
+
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-05.html"><small>PREVIOUS</small>← Choose the next batch</a><a class="next" href="chapter-07.html"><small>NEXT</small>Put experts on several devices →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#overlap-has-a-limit">6.1 Overlap has a limit</a><a class="toc-sub" href="#which-interval-does-a-timer-see">6.1.1 Which interval does a timer see?</a><a class="" href="#one-request-crosses-two-steps">6.2 One request crosses two steps</a><a class="toc-sub" href="#the-missing-token">6.2.1 The missing token</a><a class="toc-sub" href="#the-missing-accepted-length">6.2.2 The missing accepted length</a><a class="toc-sub" href="#a-query-length-chosen-on-the-device">6.2.3 A query length chosen on the device</a><a class="" href="#read-the-correction-path">6.3 Read the correction path</a><a class="toc-sub" href="#two-sets-of-metadata-describe-one-step">6.3.1 Two sets of metadata describe one step</a><a class="toc-sub" href="#when-the-correction-does-not-run">6.3.2 When the correction does not run</a><a class="" href="#last-use-reuse-and-the-cost-of-endofsequence">6.4 Last use, reuse and the cost of end-of-sequence</a><a class="toc-sub" href="#what-makes-a-release-safe">6.4.1 What makes a release safe</a><a class="" href="#graphs-constrain-the-input-buffers">6.5 Graphs constrain the input buffers</a><a class="" href="#experiments-to-try-next5">6.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

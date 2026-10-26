@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>State needs an owner · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link active" href="chapter-04.html" aria-current="page"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 04</p><h1 class="chapterHead" id="state-needs-an-owner"><a id="x1-540004"></a>State needs an owner</h1>
+<p class="noindent"><a id="ref-ch:state"></a>
+</p><p class="indent">   Chapter 3 ended with an address: a state ID multiplied by a ring length, plus a position
+modulo that length. Something must hand out those IDs. It must also decide when an ID can be
+given to another request. A request’s memory need grows one token at a time, and requests finish
+in an order nobody chose in advance. Two requests may even begin with the same
+text.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-6">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">How can requests of different and changing lengths share one finite memory pool?
+When two requests use the same stored prefix, when is it safe to reuse that memory?
+</p>
+</div>
+</div>
+<h3 class="sectionHead" id="hand-out-memory-in-blocks"><span class="titlemark">4.1   </span> <a id="x1-550004.1"></a>Hand out memory in blocks</h3>
+<p class="noindent">Suppose the engine gave each request one contiguous region sized for its longest possible answer.
+Most requests stop early, so much of that memory would sit unused. Reserving exactly the
+current length fails the other way: the next token needs room that may already belong to
+someone else.
+</p><p class="indent">   A common answer is to divide memory into equal <em>blocks</em>, each holding a fixed number
+of token positions. A request owns a list of block IDs, called its <em>block table</em>. Position
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math> lives in
+block <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mstyle mathvariant="italic"><mi>table</mi></mstyle><mo class="MathClass-open" stretchy="false">[</mo><mo class="MathClass-open" stretchy="false">⌊</mo><mi>p</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>B</mi><mo class="MathClass-close" stretchy="false">⌋</mo><mo class="MathClass-close" stretchy="false">]</mo></mrow></math> at
+offset <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi><mspace width="0.2em"></mspace><mo class="MathClass-bin" stretchy="false"> mod</mo><mspace width="0.2em"></mspace> <mi>B</mi></mrow></math>,
+where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi></mrow></math>
+is the block size. The blocks need not be adjacent. Any free block can serve any request. This
+paged design was popularised for language-model serving by vLLM <span class="cite">[<a href="references.html#Xpaged-attention">32</a>]</span>.
+</p><p class="indent">   Run the first experiment:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/09_blocks.py
+</code></pre></div>
+<p class="indent">   It uses a pool of eight blocks with four positions each. Block 0 is never handed out; the
+number 0 can therefore mean “no block”. Before reading the output, predict when request A,
+which starts with six tokens, first needs a third block.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>admit A(6), B(9)               A=[1, 2] B=[3, 4, 5]         free=[6, 7]
+A reaches 8 tokens             A=[1, 2] B=[3, 4, 5]         free=[6, 7]
+A reaches 9 tokens             A=[1, 2, 6] B=[3, 4, 5]      free=[7]
+A at 11, two drafts reserved   A=[1, 2, 6, 7] B=[3, 4, 5]   free=[]
+drafts rejected; A at 12       A=[1, 2, 6] B=[3, 4, 5]      free=[7]
+admission check for 4 blocks: LATER
+B finishes                     A=[1, 2, 6]                  free=[7, 5, 4, 3]
+admission check for 4 blocks: OK
+admission check for 8 blocks: NEVER
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/09_blocks.txt">results/09_blocks.txt</a></div></div>
+<p class="indent">   Six tokens need <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mn>6</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">⌉</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn></mrow></math>
+blocks and nine need three, so A receives block 6 at its ninth token, not at its
+seventh. The last block in a table is usually only partly full. With block size
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi></mrow></math>, at
+most <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>
+positions are idle per request, however long the request becomes.
+</p><p class="indent">   The fourth line reserves room for two tokens that do not yet exist. Chapter 8 will
+introduce <em>draft tokens</em>: cheap guesses that the model verifies in the next step. Positions
+for a draft must exist before the step writes it. Here 11 tokens plus two drafts need
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mn>13</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">⌉</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math> blocks,
+so A takes the last free block. Both drafts are then rejected and the verified step adds one token.
+Twelve tokens need only three blocks, and block 7 returns to the pool. A table can shrink as well
+as grow.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The admission checks distinguish two kinds of refusal. Four blocks are not free while B runs,
+so the answer is <code>LATER</code>: the request can wait. Eight blocks exceed the seven that this pool can
+ever issue, so the answer is <code>NEVER</code>. Waiting would not help.
+</p><p class="indent">   Each block carries an owner count. The pool allocates from the front of its
+free list and returns a block to the back when the count reaches zero. When B
+finishes, its blocks are released in reverse table order. The free list therefore ends as
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>7</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>5</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>: B’s
+last block will be reused before its first. The check in <code>show </code>confirms after every step that each
+usable block is either owned or free, never both and never neither.
+</p>
+<h3 class="sectionHead" id="two-owners-one-block"><span class="titlemark">4.2   </span> <a id="x1-560004.2"></a>Two owners, one block</h3>
+<p class="noindent">Owner counts matter once two requests share a block. Suppose a parent request has processed ten
+prompt tokens and a second request, the child, should continue from the same prefix.
+Recomputing the prefix would repeat work; copying all its blocks would repeat memory. The child
+can instead point to the parent’s blocks and add one to each block’s count. We call that <em>pinning </em>a
+block.
+</p><p class="indent">   Sharing is safe only for rows that neither owner will write again. Positions 0–7 fill the first two
+blocks and are complete. Positions 8 and 9 sit in a partly filled third block. The next token of
+either request would be written there. So the child keeps the two full blocks and receives a private
+copy of the partial one. Copying only when a write would otherwise affect another owner is called
+<em>copy-on-write</em>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/10_share.py
+</code></pre></div>
+<p class="indent">   The experiment stores token IDs in place of key and value rows, so a wrong block shows up as
+a wrong number:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.1.</b> Pin the parent’s table; keep full blocks and copy a partial tail.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">38</span><span><span class="k">def</span> <span class="nf">fork</span><span class="p">(</span><span class="n">pool</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">processed</span><span class="p">,</span> <span class="n">copies</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span>    <span class="n">child</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span>    <span class="n">pool</span><span class="o">.</span><span class="n">pin</span><span class="p">(</span><span class="n">child</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span>    <span class="n">keep</span> <span class="o">=</span> <span class="n">processed</span> <span class="o">//</span> <span class="n">BLOCK_SIZE</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span>    <span class="n">unpin</span> <span class="o">=</span> <span class="n">child</span><span class="p">[</span><span class="n">keep</span><span class="p">:]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span>    <span class="n">child</span><span class="p">[</span><span class="n">keep</span><span class="p">:]</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span>    <span class="k">if</span> <span class="n">processed</span> <span class="o">%</span> <span class="n">BLOCK_SIZE</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>        <span class="n">tail</span> <span class="o">=</span> <span class="n">pool</span><span class="o">.</span><span class="n">allocate</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span>        <span class="n">copies</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">unpin</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">tail</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span>        <span class="n">child</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tail</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span>    <span class="k">return</span> <span class="n">child</span><span class="p">,</span> <span class="n">unpin</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/10_share.py">labs/10_share.py</a> · lines 38–48</div></div>
+<figure class="figure"><a id="ref-fig:block-sharing"></a>
+<p class="noindent" id="-the-fork-in-labssharepy-before-the-queued-copy-runs-both-tables-point-to-the-two-full-blocks-so-each-has-two-owners-the-parents-partial-tail-is-copied-into-block-the-childs-pin-on-block-is-released-only-after-the-copy-token-ids-stand-in-for-kv-rows"><a aria-label="Open figure at full size" class="figure-image" href="webbook12x.svg" rel="noopener" target="_blank"><img alt="Figure 4.1: The fork in labs/10_share.py , before the queued copy runs. Both tables point
+to the two full blocks, so each has two owners. The parent’s partial tail is copied into block
+4; the child’s pin on block 3 is released only after the copy. Token IDs stand in for KV rows." loading="lazy" src="webbook12x.svg"/></a>
+<a id="x1-56001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 4.1: </span><span class="content">The fork in <code>labs/10_share.py</code>, before the queued copy runs. Both tables point
+to the two full blocks, so each has two owners. The parent’s partial tail is copied into block
+4; the child’s pin on block 3 is released only after the copy. Token IDs stand in for KV rows.
+</span></figcaption>
+
+</figure>
+<p class="indent">   In both runs, the fork gives blocks 1, 2 and 3 two owners, as Figure <a href="chapter-04.html#ref-fig:block-sharing">4.1</a> shows. The parent
+then finishes. Its release lowers every count by one, but blocks 1 and 2 still belong to the child
+and do not enter the free list. The script asserts this. Ending one owner’s lifetime has not ended
+the data’s lifetime.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Release the tail pin before the queued copy
+  fork: parent=[1, 2, 3] child=[1, 2, 4] refs 1:2 2:2 3:2 4:1 copy=[(3, 4)]
+  parent finishes: free=[]; shared [1, 2] kept
+  writer receives block 3 before the copy runs
+  child reads [100, 101]...[900, 901]: correct=False
+
+Release the tail pin after the queued copy
+  fork: parent=[1, 2, 3] child=[1, 2, 4] refs 1:2 2:2 3:2 4:1 copy=[(3, 4)]
+  parent finishes: free=[]; shared [1, 2] kept
+  writer waits; receives block 3 after the copy
+  child reads [100, 101]...[108, 109]: correct=True
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/10_share.txt">results/10_share.txt</a></div></div>
+<p class="indent">   The difference lies in the tail. The copy from block 3 to block 4 is queued, standing for work
+submitted to a device that runs later. In the first run, the host releases the child’s pin on block 3
+as soon as it has queued the copy. The parent has already finished, so the block’s count reaches
+zero, so a new writer receives it and stores its own rows. When the queued copy finally runs,
+it copies the writer’s data. The child reads 900 and 901 where it expected 108 and
+109.
+</p><p class="indent">   In the second run, the host keeps the pin until the copy has run. The writer must wait for a
+block, then receives block 3 safely. The safe policy costs capacity for a short time: a block that
+no request will use again stays unavailable until queued work has finished reading
+it.
+</p><p class="indent">   The writer in this lab does not wait for the copy queue. If every later write were queued
+behind the copy in the same order, the early release would not corrupt this example. A
+host-side allocator usually cannot assume that about every future writer. The rule
+“release a source only after work that reads it has completed” avoids depending on that
+assumption.
+</p>
+<h3 class="sectionHead" id="follow-deepinfers-ownership-path"><span class="titlemark">4.3   </span> <a id="x1-570004.3"></a>Follow DeepInfer’s ownership path</h3>
+<p class="noindent">DeepInfer implements both experiments’ ideas, with one addition: there are two pools. Figure <a href="chapter-04.html#ref-fig:deepinfer-ownership">4.2</a>
+places them on the request path from chapter 1. We will follow one request from admission to
+release, then a fork of its prefix.
+</p>
+<figure class="figure"><a id="ref-fig:deepinfer-ownership"></a>
+<p class="noindent" id="-the-ownership-path-in-this-chapter-one-allocator-class-manages-two-pools-the-scheduler-stores-the-ids-in-each-requests-cache-state-and-records-copies-the-engine-releases-copied-sources-only-after-the-copy-event-completes-deepinferenginedeepinferblockmanagerdeepinferschedulermemory"><a aria-label="Open figure at full size" class="figure-image" href="webbook13x.svg" rel="noopener" target="_blank"><img alt="Figure 4.2: The ownership path in this chapter. One allocator class manages two pools.
+The scheduler stores the IDs in each request’s cache state and records copies; the engine
+releases copied sources only after the copy event completes [ 5 , 34 , 33 ] ." loading="lazy" src="webbook13x.svg"/></a>
+<a id="x1-57001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 4.2: </span><span class="content">The ownership path in this chapter. One allocator class manages two pools.
+The scheduler stores the IDs in each request’s cache state and records copies; the engine
+releases copied sources only after the copy event completes <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-block-manager">34</a>, <a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="two-pools-one-allocator-class"><span class="titlemark">4.3.1   </span> <a id="x1-580004.3.1"></a>Two pools, one allocator class</h4>
+<p class="noindent">The engine creates both pools when it starts:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.2.</b> One allocator class for paged blocks and state slots.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">265</span><span><span class="bp">self</span><span class="o">.</span><span class="n">block_manager</span> <span class="o">=</span> <span class="n">BlockManager</span><span class="p">(</span><span class="n">cache_config</span><span class="o">.</span><span class="n">num_gpu_blocks</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span><span class="bp">self</span><span class="o">.</span><span class="n">state_manager</span> <span class="o">=</span> <span class="n">BlockManager</span><span class="p">(</span><span class="n">cache_config</span><span class="o">.</span><span class="n">num_state_seqs</span><span class="p">)</span> <span class="k">if</span> <span class="n">cache_config</span><span class="o">.</span><span class="n">bytes_of_state_per_seqs</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="kc">None</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L265-L266">deepinfer/engine/llm_engine.py</a> · lines 265–266</div></div>
+<p class="indent">   The first manager issues paged KV blocks. For the V4 model, the block size is 128 token
+positions (<span class="path"><code>model_metadata_utils.py</code></span>, lines 134–135). The cache engine’s field descriptions place
+the compressed-attention cache and the index cache in these blocks, each block holding
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>128</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mstyle class="text"><mtext>ratio</mtext></mstyle></mrow></math> rows
+for its compression ratio (<span class="path"><code>cache_engine.py</code></span>, lines 206–219). The compression and indexing
+appendix (Appendix <a href="appendix-a.html#ref-app:compression">A</a>) explains those rows. Here they are simply rows assigned to token
+ranges.
+</p><p class="indent">   The second manager issues <em>state slots</em>, one per running request. A slot holds the SWA ring from
+chapter 3 and the compression state. The pool exists only if the model has such state. Its size is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌊</mo><mn>1.2</mn> <mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">max_num_seqs</mtext></mstyle><mo class="MathClass-close" stretchy="false">⌋</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> by default
+(<span class="path"><code>cache_engine.py</code></span>, lines 201–202; <span class="path"><code>environ.py</code></span>, line 162). Because slot 0 is never issued, this provides
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌊</mo><mn>1.2</mn> <mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">max_num_seqs</mtext></mstyle><mo class="MathClass-close" stretchy="false">⌋</mo></mrow></math> usable
+slots <span class="cite">[<a href="references.html#Xdeepinfer-cache">23</a>, <a href="references.html#Xdeepinfer-environ">30</a>]</span>.
+</p><p class="indent">   The order of sizing is revealing. After a profiling run, the worker subtracts the fixed state
+reservation from available device memory, doubled for what its comment calls the state store and
+a copy buffer. Only the remainder becomes paged blocks (<span class="path"><code>deepinfer/worker/base.py</code></span>, lines
+237–246). The number of state slots follows from the request limit; the number of blocks follows
+from whatever memory is left <span class="cite">[<a href="references.html#Xdeepinfer-memory-profile">36</a>]</span>.
+</p><p class="indent">   The block table retains the paged-addressing idea introduced at the start of this chapter. The
+additional allocation boundary follows the model: compressed KV and index rows
+belong to token blocks, while the SWA ring and rolling compression state belong to
+a request. DeepInfer gives both regions the same allocator machinery but different
+capacities and copy lifetimes. This is a comparison between a general paging mechanism
+and its use for this model, not a claim that every other engine has only one kind of
+state.
+</p>
+<h4 class="subsectionHead" id="an-owner-count-decides-when-a-block-is-free"><span class="titlemark">4.3.2   </span> <a id="x1-590004.3.2"></a>An owner count decides when a block is free</h4>
+<p class="noindent">Both managers use the same small structure, <code>Blocks</code>. Its <code>allocate </code>method, lines 82–86, takes the
+head of an intrusive free list, a linked list threaded through the block records themselves, and sets
+the block’s owner count to one. Its comment says, in the author’s translation, that removal from
+the list has already checked for a zero count. The other two operations change an existing
+count:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.3.</b> Share a live block; release one owner.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">88</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">pin_block</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">block_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">89</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">block_id</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">block_id</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">_blocks</span><span class="p">.</span><span class="n">size</span><span class="p">()));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">90</span><span><span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">block</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_blocks</span><span class="p">[</span><span class="n">block_id</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">91</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">block</span><span class="p">.</span><span class="n">ref_count</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">"try to pin free block"</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">92</span><span><span class="w">    </span><span class="n">block</span><span class="p">.</span><span class="n">ref_count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">93</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">94</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">95</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">free</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">block_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">96</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">block_id</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">block_id</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">_blocks</span><span class="p">.</span><span class="n">size</span><span class="p">()));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">97</span><span><span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">block</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_blocks</span><span class="p">[</span><span class="n">block_id</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">98</span><span><span class="w">    </span><span class="n">block</span><span class="p">.</span><span class="n">ref_count</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">99</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">block</span><span class="p">.</span><span class="n">ref_count</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">"ref_count corrupted: ref_count &lt; 0"</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">100</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">block</span><span class="p">.</span><span class="n">ref_count</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">101</span><span><span class="w">        </span><span class="n">_push_back</span><span class="p">(</span><span class="n">block_id</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">103</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/block_manager.hpp#L88-L103">csrc/engine/block_manager.hpp</a> · lines 88–103</div></div>
+<p class="indent"> <code>pin_block </code>adds an owner but refuses a free block: sharing must start from a live one. <code>free</code>
+removes one owner and returns the block to the back of the list only at zero. The Python binding
+exposes <code>free_blocks </code>under the name <code>unpin_blocks </code>(<span class="path"><code>pybind_scheduler.cpp</code></span>, line 68).
+Releasing a request and releasing a pin are the same operation <span class="cite">[<a href="references.html#Xdeepinfer-block-manager">34</a>, <a href="references.html#Xdeepinfer-scheduler-binding">35</a>]</span>.
+</p><p class="indent">   The structure’s constructor explains the lab’s reserved block. Its comment at line 27 says, in
+                                                                                  
+                                                                                  
+the author’s translation, “GPU block 0 is unused, so 0 here means empty”. Block 0 terminates the
+free list; later we will see it mark a copy with no destination.
+</p><p class="indent"> <code>can_allocate_nolock</code>, lines 128–136, returns the lab’s three answers. A request for at least
+<code>num_blocks </code>blocks is <code>NEVER</code>, because block 0 can never be issued. The scheduler combines this
+answer with the state pool: if blocks are available but no state slot is, the result becomes
+<code>LATER </code>(<span class="path"><code>scheduler.hpp</code></span>, lines 194–201). A request needs both kinds of storage to run
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="reserve-positions-that-the-history-does-not-show"><span class="titlemark">4.3.3   </span> <a id="x1-600004.3.3"></a>Reserve positions that the history does not show</h4>
+<p class="noindent">How many blocks should a request own? DeepInfer’s answer includes positions that are not yet
+tokens:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.4.</b> Count history, in-flight and draft positions.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">291</span><span><span class="kt">int</span><span class="w"> </span><span class="nf">get_num_blocks</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">292</span><span><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">get_len</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">schedule</span><span class="p">.</span><span class="n">total_inflight_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">get_nextn_len</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">cache</span><span class="p">.</span><span class="n">block_size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">cache</span><span class="p">.</span><span class="n">block_size</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">293</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L291-L293">csrc/engine/sequence.hpp</a> · lines 291–293</div></div>
+<p class="indent">   The first term is the token history from chapter 1. The second counts positions of steps that have
+been scheduled but whose results have not yet reached the host. Under ZOS, the scheduler plans step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> while
+step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> is
+still running, so the history is behind the work already submitted. The third term counts draft
+tokens awaiting verification. Memory must cover all three, or a step could write beyond its
+table.
+</p><p class="indent">   When a request is first admitted for prompt work, <code>allocate_seq </code>takes this many blocks and
+one state slot (<span class="path"><code>scheduler.hpp</code></span>, lines 518–519; <span class="path"><code>block_manager.hpp</code></span>, lines 207–214). The count
+uses the whole current prompt. A long prompt may be processed in several chunks, but its blocks
+are reserved at the first one. Chunking divides the computation, not the memory claim
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>, <a href="references.html#Xdeepinfer-block-manager">34</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="each-decode-step-adjusts-the-table"><span class="titlemark">4.3.4   </span> <a id="x1-610004.3.4"></a>Each decode step adjusts the table</h4>
+<p class="noindent">Before each decode step, the scheduler brings every running table back to the required
+length:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.5.</b> Grow by one block or release the surplus.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">817</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">_append_slot</span><span class="p">(</span><span class="n">Sequence</span><span class="w"> </span><span class="o">&amp;</span><span class="n">seq</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">818</span><span><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num_blocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">get_num_blocks</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">819</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="k">decltype</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">)</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">820</span><span><span class="w">        </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">allocate_single_nolock</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">821</span><span><span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="k">decltype</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">)</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">822</span><span><span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">redundant_blocks</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">end</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">823</span><span><span class="w">        </span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">free_blocks_nolock</span><span class="p">(</span><span class="n">redundant_blocks</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">824</span><span><span class="w">        </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">end</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">825</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">826</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="k">static_cast</span><span class="o">&lt;</span><span class="k">decltype</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">)</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">827</span><span><span class="w">        </span><span class="s">"len(block_table) = "</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">(),</span><span class="w"> </span><span class="s">", but should be "</span><span class="p">,</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">,</span><span class="w"> </span><span class="s">". seq_len = "</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">get_len</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">828</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L817-L828">csrc/engine/scheduler.hpp</a> · lines 817–828</div></div>
+<p class="indent">   The growth branch takes one block; the lab’s general <code>resize </code>can take more. With
+128-position blocks and, by default, at most six new positions per request in a step,
+one block is enough; the final check would catch a shortfall. The shrink branch is the
+lab’s rejected-draft case: when fewer positions are reserved, surplus blocks go back
+immediately. The decode loop calls this function only after checking that a block is free. If
+none is, it preempts another request (lines 629–640). Chapter 5 examines that choice
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="a-written-row-is-not-yet-a-valid-row"><span class="titlemark">4.3.5   </span> <a id="x1-620004.3.5"></a>A written row is not yet a valid row</h4>
+<p class="noindent">A table says which blocks a request owns. It does not say which rows inside them are meaningful.
+That is the job of the request’s processed-token count:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.6.</b> Advance the processed count, then correct it.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">216</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">advance_optimistically</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">token_count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">217</span><span><span class="w">    </span><span class="n">previous_num_tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">num_tokens</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">218</span><span><span class="w">    </span><span class="n">num_tokens</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">token_count</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">219</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">220</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">221</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">commit_processed_tokens</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">token_count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">num_tokens</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">previous_num_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">token_count</span><span class="p">;</span><span class="w"> </span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L216-L221">csrc/engine/sequence.hpp</a> · lines 216–221</div></div>
+<p class="indent">   When a step’s output is processed, the scheduler first advances <code>num_tokens </code>by every position
+the step evaluated (<span class="path"><code>scheduler.hpp</code></span>, line 927). For decode, it then commits the true count. The
+comment at line 998 says, in the author’s translation: “decode: correct <code>cache.num_tokens </code>from
+the optimistically advanced value to the number actually accepted (rejected drafts do not occupy
+KV)” <span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>, <a href="references.html#Xdeepinfer-sequence">6</a>]</span>.
+</p><p class="indent">   “Do not occupy” describes meaning, not bytes. The verification step wrote rows for its drafts
+into the request’s blocks. After rejection those bytes remain until a later token overwrites them,
+but they lie beyond <code>num_tokens </code>and no reader should use them. Validity is decided by the
+count, not by whether bytes are present. Chapter 3 drew the same distinction between
+leaving the window and being overwritten. Here it applies to rows that were never
+accepted.
+</p>
+<h4 class="subsectionHead" id="fork-a-prefix-by-pinning-it"><span class="titlemark">4.3.6   </span> <a id="x1-630004.3.6"></a>Fork a prefix by pinning it</h4>
+<p class="noindent">Prefix sharing enters through <code>Scheduler::fork_seq </code>(lines 1061–1122). The released benchmark
+uses it to give a batch of decode requests one cached prompt, in <code>fork_request_batch</code>
+(<span class="path"><code>examples/benchmark.py</code></span>, lines 331–353). Production prefix reuse also involves the external
+KV cache system, which the release does not include <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-benchmark">15</a>]</span>. The fork itself is a few
+lines:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.7.</b> The child pins the parent’s blocks and state slot.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">1110</span><span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">pin_blocks</span><span class="p">(</span><span class="n">fork_seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1111</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">state_manager</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1112</span><span><span class="w">    </span><span class="n">fork_seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">state_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">state_id</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1113</span><span><span class="w">    </span><span class="n">state_manager</span><span class="o">-&gt;</span><span class="n">pin_block</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">state_id</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1114</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1110-L1114">csrc/engine/scheduler.hpp</a> · lines 1110–1114</div></div>
+<p class="indent">   At this point the child shares everything, including the parent’s state slot. That cannot last. A
+state slot holds a ring that every decode step writes, as chapter 3 showed. Two requests cannot
+advance one ring.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The benchmark’s forks share a fully processed prompt, so they take the scheduler’s path for
+forks entering decode. It separates what must be private:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.8.</b> Copy the mutable state and the last block; release the rest.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">602</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">forked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">603</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">state_manager</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">state_manager</span><span class="o">-&gt;</span><span class="n">can_allocate_single_nolock</span><span class="p">())</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">!</span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">can_allocate_single_nolock</span><span class="p">())</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">604</span><span><span class="w">        </span><span class="k">break</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">605</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">606</span><span><span class="w">    </span><span class="n">_clone_state</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">607</span><span><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">new_block</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">allocate_single_nolock</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">608</span><span><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num_blocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">num_tokens</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_size</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_size</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">609</span><span><span class="w">    </span><span class="n">TORCH_CHECK_LE</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">,</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">()));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">610</span><span><span class="w">    </span><span class="n">clone_blocks</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">[</span><span class="n">num_blocks</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">611</span><span><span class="w">    </span><span class="n">clone_blocks</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">new_block</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">612</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">613</span><span><span class="w">        </span><span class="n">clone_blocks</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">614</span><span><span class="w">        </span><span class="n">clone_blocks</span><span class="p">.</span><span class="n">emplace_back</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">615</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">616</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">[</span><span class="n">num_blocks</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_block</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">617</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">begin</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">num_blocks</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">end</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">618</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L602-L618">csrc/engine/scheduler.hpp</a> · lines 602–618</div></div>
+<p class="indent">   The fork waits unless one state slot and one block are free. <code>_clone_state </code>allocates a new
+state slot and records an (old, new) copy (lines 203–212). <code>num_blocks </code>counts the blocks that hold
+processed rows. The last of them is copied into the new block; this path copies it even when it
+happens to be full. Every later parent block is recorded with destination 0: release without
+copying. The table then points to the shared complete blocks followed by the private
+copy.
+</p><p class="indent">   Forks whose prompt continues beyond the shared prefix are admitted through the prompt
+path instead (lines 412–437). There the shared part is the <code>num_reserve_blocks </code>complete blocks,
+and the tail is copied only when the processed count ends partway through a block. The comment
+at line 427 says “has a tail, needs copy” (author’s translation). That is the rule in our lab
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+</p><p class="indent">   This is the lab’s rule with one more kind of state. Complete prefix blocks are read but not
+written, so they are shared. The partial tail and the state ring will be written, so each owner gets
+its own copy.
+</p>
+<h4 class="subsectionHead" id="release-a-source-only-after-its-copy"><span class="titlemark">4.3.7   </span> <a id="x1-640004.3.7"></a>Release a source only after its copy</h4>
+<p class="noindent">The copy lists reach the device during <code>LLMEngine.step </code>(<span class="path"><code>llm_engine.py</code></span>, lines 889–905). The
+C++ helper queues a device copy for each pair with a nonzero destination and adds every source
+to a release list, whether or not it was copied (<span class="path"><code>scheduler.hpp</code></span>, lines 1288–1300). The engine does
+not release those sources at once:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.9.</b> Record an event after the queued copies.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">95</span><span><span class="k">def</span> <span class="nf">collect_clone_unpins</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">states_to_unpin</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">],</span> <span class="n">blocks_to_unpin</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">96</span><span>    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">clone_unpins_to_release</span> <span class="ow">is</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">97</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">clone_done_evt</span><span class="o">.</span><span class="n">record</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">98</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">clone_unpins_to_release</span> <span class="o">=</span> <span class="p">(</span><span class="n">states_to_unpin</span><span class="p">,</span> <span class="n">blocks_to_unpin</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L95-L98">deepinfer/engine/llm_engine.py</a> · lines 95–98</div></div>
+<p class="indent">   An <em>event </em>marks a point in the device’s work queue; the host can later wait until the device
+has passed it. The release happens in <code>DeferredRelease.release</code>. The engine calls
+it from <code>pre_sampler_sync </code>later in the same step, as the comment at line 904 says.
+By then the worker has launched the forward pass and sampling (<span class="path"><code>worker.py</code></span>, lines
+113–164):
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.10.</b> Wait for the copies, then drop the pins.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">109</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">clone_unpins_to_release</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">110</span><span>    <span class="n">states_to_unpin</span><span class="p">,</span> <span class="n">blocks_to_unpin</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">clone_unpins_to_release</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">111</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">clone_unpins_to_release</span> <span class="o">=</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">112</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">clone_done_evt</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">113</span><span>    <span class="k">if</span> <span class="n">states_to_unpin</span><span class="o">.</span><span class="n">size</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">114</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">state_manager</span><span class="o">.</span><span class="n">unpin_blocks</span><span class="p">(</span><span class="n">states_to_unpin</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">115</span><span>    <span class="k">if</span> <span class="n">blocks_to_unpin</span><span class="o">.</span><span class="n">size</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">116</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">block_manager</span><span class="o">.</span><span class="n">unpin_blocks</span><span class="p">(</span><span class="n">blocks_to_unpin</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L109-L116">deepinfer/engine/llm_engine.py</a> · lines 109–116</div></div>
+<p class="indent">   This is the second run of the sharing lab. The host waits for the copy event before the sources
+can return to either free list. The copies were queued before the forward pass, so the host’s wait
+does not hold back the forward and sampling work already queued behind them <span class="cite">[<a href="references.html#Xdeepinfer-worker">7</a>]</span>. The class
+docstring states the general purpose: collect resources to release, then release them at the next
+<code>pre_sampler_sync</code>, overlapping with device computation (lines 68–71). The same object
+delays the output-pool release from chapter 1 and the release of per-step metadata
+<span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="finishing-returns-every-reference"><span class="titlemark">4.3.8   </span> <a id="x1-650004.3.8"></a>Finishing returns every reference</h4>
+<p class="noindent">A finished or preempted request gives back what it owns:
+                                                                                  
+                                                                                  
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.11.</b> Release the draft slot, state slot and blocks.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">738</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">free_seq_nolock</span><span class="p">(</span><span class="n">Sequence</span><span class="w"> </span><span class="o">&amp;</span><span class="n">seq</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">739</span><span><span class="w">    </span><span class="n">release_mtp_info_slot</span><span class="p">(</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">740</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">state_id</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">741</span><span><span class="w">        </span><span class="n">state_manager</span><span class="o">-&gt;</span><span class="n">free_blocks_nolock</span><span class="p">({</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">state_id</span><span class="p">});</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">742</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">743</span><span><span class="w">    </span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">free_blocks_nolock</span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">744</span><span><span class="w">    </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">745</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L738-L745">csrc/engine/scheduler.hpp</a> · lines 738–745</div></div>
+<p class="indent"> <code>release_mtp_info_slot </code>returns a third resource, a slot for draft information that chapter 8
+will use. Then the state slot and every block lose one owner. A block shared with a fork survives;
+an unshared block returns to its free list. <code>free_blocks_nolock </code>walks the table in reverse
+(<span class="path"><code>block_manager.hpp</code></span>, lines 147–149), which is why the lab’s free list ended with B’s blocks in
+reverse order. The source does not explain that choice.
+</p>
+<h4 class="subsectionHead" id="output-storage-has-a-different-owner"><span class="titlemark">4.3.9   </span> <a id="x1-660004.3.9"></a>Output storage has a different owner</h4>
+<p class="noindent"><a id="ref-sec:output-storage"></a>
+</p><p class="indent">   Chapter 1’s result records belong to <code>RequestOutputPool</code>. The caller must clone
+any record it keeps before the pool releases it. That ownership change differs from
+pinning a KV block: cloning creates a new object, while pinning adds an owner of the
+same block. The binding’s <code>clone </code>constructs a new object from the one at the supplied
+address:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.12.</b> Copy the addressed output into a separately owned object.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">16</span><span><span class="n">py</span><span class="o">::</span><span class="n">class_</span><span class="o">&lt;</span><span class="n">RequestOutput</span><span class="o">&gt;</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="s">"RequestOutput"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span><span class="w">    </span><span class="p">.</span><span class="n">def_static</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span><span class="w">        </span><span class="s">"clone"</span><span class="p">,</span><span class="w"> </span><span class="p">[](</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">ptr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">RequestOutput</span><span class="o">&gt;</span><span class="p">(</span><span class="o">*</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">RequestOutput</span><span class="w"> </span><span class="o">*&gt;</span><span class="p">(</span><span class="n">ptr</span><span class="p">));</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="n">py</span><span class="o">::</span><span class="n">arg</span><span class="p">(</span><span class="s">"ptr"</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_output.cpp#L16-L18">csrc/engine/pybind_output.cpp</a> · lines 16–18</div></div>
+<p class="indent">   Here <code>reinterpret_cast </code>treats the integer as an object address; <code>make_unique </code>allocates a
+separate object managed by the binding. In contrast, the pool’s release loop destroys the original
+and makes its slot available again:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 4.13.</b> Recycle storage only after the caller has had its chance to copy.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">72</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">release</span><span class="p">(</span><span class="n">py</span><span class="o">::</span><span class="n">array_t</span><span class="o">&lt;</span><span class="kt">uint64_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">ptrs_py</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">73</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="o">*</span><span class="n">ptrs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptrs_py</span><span class="p">.</span><span class="n">data</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">74</span><span><span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ptrs_py</span><span class="p">.</span><span class="n">size</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">75</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">76</span><span><span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">RequestOutput</span><span class="w"> </span><span class="o">*&gt;</span><span class="p">(</span><span class="n">ptrs</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">77</span><span><span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">destroy_at</span><span class="p">(</span><span class="n">p</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">78</span><span><span class="w">        </span><span class="n">free_</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">p</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">79</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">80</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/outputs.hpp#L72-L80">csrc/engine/outputs.hpp</a> · lines 72–80</div></div>
+<p class="indent">   The deferred-release helper invokes this operation at a later <code>pre_sampler_sync</code>.
+Merely appending <code>raw_output </code>to a Python list would leave an integer referring to
+destroyed or reused storage. Cloning during collection preserves the result across that
+boundary. The pointer-based interface allows explicit reuse of pool slots; the cost is that
+callers must follow a lifetime contract that ordinary Python references do not express
+<span class="cite">[<a href="references.html#Xdeepinfer-output-pool">9</a>, <a href="references.html#Xdeepinfer-output-binding">10</a>, <a href="references.html#Xdeepinfer-engine">5</a>]</span>.
+</p>
+<h3 class="sectionHead" id="a-state-slot-has-regions-with-different-lifetimes"><span class="titlemark">4.4   </span> <a id="x1-670004.4"></a>A state slot has regions with different lifetimes</h3>
+<p class="noindent">Ownership is not only about who may write. It also determines how long data must survive and
+where it may go. The <code>StateBlock </code>docstring in <span class="path"><code>cache_engine.py</code></span>, lines 221–241, describes one
+request’s slot. In the author’s translation of its central rule: state that must be stored goes in a
+front <em>stored region</em>; state that need not be stored, but is still needed while running, goes in
+a rear <em>dropped region</em>. Taking the first <code>state_size_to_disk </code>bytes of the <em>inference</em>
+layout therefore excludes the dropped region by truncation. The next sentences of
+the docstring add a condition (lines 226–227). If extra prefill state is enabled, each
+slot holds the longer kvstore ring from chapter 3, which must first be reordered into
+the inference window; only when it is disabled can the original buffer be cut directly.
+<code>GPUCacheInterface.select_state_slice_to_store </code>implements both branches: a direct slice
+when <span class="path"><code>DEEPINFER_PREFILL_STORE_EXTRA_STATE</code></span> is off, and a per-view reordering otherwise (lines
+763–817) <span class="cite">[<a href="references.html#Xdeepinfer-cache">23</a>]</span>.
+</p><p class="indent">   The stored region holds the SWA rings of the layers whose window must survive across
+                                                                                  
+                                                                                  
+requests. The dropped region holds the SWA layers that the deployment Q&amp;A says are recovered
+by prefill recomputation, and the compression state. Chapter 9 explains why those layers can be
+recomputed <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   The code sets <code>state_size_to_disk </code>to the padded total for the stored SWA layers, using the
+inference ring length (line 306). Chapter 3 derived that ring as 134 positions of 528 bytes:
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mn>134</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>528</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>70</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>752</mn><mspace class="nbsp" width="0.33em"></mspace><mstyle class="text"><mtext>bytes per stored layer</mtext></mstyle><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   That is already a multiple of 32, so the 32-byte padding adds nothing. The Q&amp;A states that
+V4.1 stores its first 20 layers, giving </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mn>20</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>70</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>752</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>415</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>040</mn><mspace class="nbsp" width="0.33em"></mspace><mstyle class="text"><mtext>bytes per sequence</mtext></mstyle><mo class="MathClass-punc" stretchy="false">,</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   the figure it reports <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. The layer count comes from the model configuration, which this book
+does not inspect; the arithmetic shows that the Q&amp;A’s number follows from the inspected
+layout.
+</p><p class="indent">   The released engine prepares this layout but leaves its use to the missing storage system.
+<code>LLMEngine.should_copy_state </code>returns <code>False</code>, and <code>do_save_kvcache </code>and related methods
+are empty hooks; their docstrings call them virtual functions (<span class="path"><code>llm_engine.py</code></span>, lines
+811–822). The Q&amp;A describes the production behaviour: copying the window at 128-token
+boundaries, keeping SWA state in the producing machine’s host memory and fetching it
+across machines on a hit. That is documented service design, not released engine code
+<span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="what-a-cache-entry-means"><span class="titlemark">4.5   </span> <a id="x1-680004.5"></a>What a cache entry means</h3>
+<p class="noindent">We can now answer chapter 1’s third question, which memory holds the state needed to continue,
+with some precision. Two different questions hide in it.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The first asks which rows form a committed prefix: rows that later steps, a fork or a store may
+reuse. Such a row must satisfy four conditions together:
+     </p><ol class="enumerate1">
+<li class="enumerate" id="x1-68002x1">The request owns the block or state slot, alone or through a pin.
+     </li>
+<li class="enumerate" id="x1-68004x2">The row’s position is below the request’s processed-token count, <code>num_tokens</code>.
+     </li>
+<li class="enumerate" id="x1-68006x3">The row has not been replaced by a later write to the same physical slot, as in chapter
+     3’s ring.
+     </li>
+<li class="enumerate" id="x1-68008x4">Any queued copy that fills it has completed before it is read.</li></ol>
+<p class="indent">   The second asks which rows the current step’s computation may read. That range is larger.
+When the scheduler builds a step’s metadata, it sets the key length to <code>num_tokens </code>plus the
+positions of steps still in flight plus this step’s query positions (<span class="path"><code>scheduler.hpp</code></span>, line 697).
+Attention in this step reads rows that the step has just written for its own queries and drafts,
+before the host has advanced <code>num_tokens</code>. Those rows are visible because the step’s metadata
+and indices say so. They join the committed prefix only if the later correction accepts them
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-memory">33</a>]</span>.
+</p><p class="indent">   Ownership is recorded in owner counts, the committed prefix in <code>num_tokens</code>, the current
+step’s visibility in its metadata and indices, physical replacement in address arithmetic, and copy
+completion in device events. No single data structure answers the whole question. The next
+chapter asks what happens when the free lists run short and the scheduler must decide who
+waits.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next3"><span class="titlemark">4.6   </span> <a id="x1-690004.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-69002x1">In <span class="path"><code>labs/09_blocks.py</code></span>, reserve five drafts instead of two at length 11. How many
+     blocks must <code>resize </code>add at once? DeepInfer’s <code>_append_slot </code>adds at most one. State
+     a condition on block size and positions added per step under which one block is always
+     enough.
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-69004x2">In <span class="path"><code>labs/10_share.py</code></span>, set <code>PROCESSED </code>to 8 instead of 10. Predict the copy list, the
+     owner counts and whether releasing the pin early still corrupts the child. The script’s
+     final check expects corruption only when a tail copy was queued; confirm that it
+     passes.
+     </li>
+<li class="enumerate" id="x1-69006x3">Change <code>release </code>in either lab to walk blocks in forward order. Which block does
+     the next allocation receive? Suggest a reason an engine might prefer one order, and
+     describe an experiment that could test it. The source gives no reason, so label your
+     answer as a hypothesis.
+     </li>
+<li class="enumerate" id="x1-69008x4">The state pool provides <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌊</mo><mn>1.2</mn> <mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">max_num_seqs</mtext></mstyle><mo class="MathClass-close" stretchy="false">⌋</mo></mrow></math>
+     usable slots. List situations in which more than <code>max_num_seqs </code>slots can be held at
+     once. Check each against the fork and release code before relying on it.</li></ol>
+
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-03.html"><small>PREVIOUS</small>← The model shapes the engine</a><a class="next" href="chapter-05.html"><small>NEXT</small>Choose the next batch →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#hand-out-memory-in-blocks">4.1 Hand out memory in blocks</a><a class="" href="#two-owners-one-block">4.2 Two owners, one block</a><a class="" href="#follow-deepinfers-ownership-path">4.3 Follow DeepInfer’s ownership path</a><a class="toc-sub" href="#two-pools-one-allocator-class">4.3.1 Two pools, one allocator class</a><a class="toc-sub" href="#an-owner-count-decides-when-a-block-is-free">4.3.2 An owner count decides when a block is free</a><a class="toc-sub" href="#reserve-positions-that-the-history-does-not-show">4.3.3 Reserve positions that the history does not show</a><a class="toc-sub" href="#each-decode-step-adjusts-the-table">4.3.4 Each decode step adjusts the table</a><a class="toc-sub" href="#a-written-row-is-not-yet-a-valid-row">4.3.5 A written row is not yet a valid row</a><a class="toc-sub" href="#fork-a-prefix-by-pinning-it">4.3.6 Fork a prefix by pinning it</a><a class="toc-sub" href="#release-a-source-only-after-its-copy">4.3.7 Release a source only after its copy</a><a class="toc-sub" href="#finishing-returns-every-reference">4.3.8 Finishing returns every reference</a><a class="toc-sub" href="#output-storage-has-a-different-owner">4.3.9 Output storage has a different owner</a><a class="" href="#a-state-slot-has-regions-with-different-lifetimes">4.4 A state slot has regions with different lifetimes</a><a class="" href="#what-a-cache-entry-means">4.5 What a cache entry means</a><a class="" href="#experiments-to-try-next3">4.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

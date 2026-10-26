@@ -4,11 +4,12 @@
 <body><a class="skip-link" href="#reading">Skip to text</a>
 <aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
 <p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
-<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">READING SAMPLE</div><a class="book-link " href="index.html"><span>00</span>Preface</a><a class="book-link " href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="references.html"><span>↗</span>References</a></nav>
-<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a><p>Preface + chapter 2<br>Other chapters are in the PDF.</p></div></details></aside>
-<div class="reader-layout"><main id="reading"><div class="page-meta"><span>THE WEB EDITION</span><span>READING SAMPLE</span></div>
-<article><h1 class="likechapterHead" id="references"><a id="x1-22000"></a>References</h1>
-<div class="thebibliography">
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link active" href="references.html" aria-current="page"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><h1 class="likechapterHead" id="references"><a id="x1-206000"></a>References</h1>
+<p id="references1"><a id="Q1-1-243"></a>
+</p><div class="thebibliography">
 <p class="bibitem"><span class="biblabel">
   [1]<span class="bibsp">   </span></span><a id="Xdeepinfer-readme"></a>DeepSeek-AI. <em>DeepInfer: release overview</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/README.md</code></a>.
     Local file: <span class="path"><code>README.md</code></span>. Inspected 20 October 2026.
@@ -19,47 +20,635 @@
     Inspected 20 October 2026.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [3]<span class="bibsp">   </span></span><a id="Xdeepinfer-engine"></a>DeepSeek-AI. <em>LLM engine</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py</code></a>.
+  [3]<span class="bibsp">   </span></span><a id="Xwriting-guide"></a>Jzstark.     <em>The     Economist     Writing     Style:     A     Practical     Reference</em>.
+    <a class="url" href="https://github.com/jzstark/eco-writing-style/blob/main/eco-style.md"><code>https://github.com/jzstark/eco-writing-style/blob/main/eco-style.md</code></a>.
+    Read 20 October 2026. The project’s chosen editorial reference.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [4]<span class="bibsp">   </span></span><a id="Xdeepinfer-entrypoint"></a>DeepSeek-AI. <em>Offline LLM entry point</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py</code></a>.
+    Symbols: <code>LLM.generate</code>, <code>LLM._add_request</code>, <code>LLM._run_engine</code>. Offline preemption
+    default: line 68.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [5]<span class="bibsp">   </span></span><a id="Xdeepinfer-engine"></a>DeepSeek-AI. <em>LLM engine</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py</code></a>.
     YOCO  prompt-logprob  restriction:  lines  528–536.  Engine  methods:  <code>add_request</code>,
     <code>step</code>,  <span class="path"><code>_execute_model_async_step</code></span> and  <code>post_process</code>.  Lifetime  helper:
     <code>DeferredRelease</code>,  lines  67–116.  <code>finalize_seq</code>:  lines  804–806;  <code>pre_sampler_sync</code>:
     lines 830–846; metadata collection in <code>post_process</code>: line 1013.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [4]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler"></a>DeepSeek-AI. <em>C++ scheduler</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp</code></a>.
+  [6]<span class="bibsp">   </span></span><a id="Xdeepinfer-sequence"></a>DeepSeek-AI. <em>Sequence state</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp</code></a>.
+    Symbols: <code>SequenceData</code>, <code>SequenceStatus</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [7]<span class="bibsp">   </span></span><a id="Xdeepinfer-worker"></a>DeepSeek-AI. <em>Worker execution</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py</code></a>.
+    Symbols:          <code>Worker.execute_model_step</code>,          <code>Worker._post_process_step</code>,
+                                                                                  
+                                                                                  
+    <code>Worker.flush_inflight_reqs</code>.  Step  order:  lines  113–189;  <code>_correct_seqlens_qk</code>:
+    lines 191–245; event wait and graph-timer flush: lines 262–266. Local source hashes
+    for these code references are recorded in <span class="path"><code>source-manifest.json</code></span>; the source links
+    above pin the verified commit.
+    </p>
+<p class="bibitem"><span class="biblabel">
+  [8]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler"></a>DeepSeek-AI. <em>C++ scheduler</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp</code></a>.
     Symbols:  <code>Scheduler::add_sequence</code>,  lines  135–142;  <code>Scheduler::schedule</code>,  lines
     667–736; <code>Scheduler::_preempt</code>, lines 766–790.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [5]<span class="bibsp">   </span></span><a id="Xdeepinfer-flops"></a>DeepSeek-AI. <em>Main-model FLOPs estimator</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp</code></a>.
+  [9]<span class="bibsp">   </span></span><a id="Xdeepinfer-output-pool"></a>DeepSeek-AI. <em>Request output storage</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/outputs.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/outputs.hpp</code></a>.
+    Symbols:   <code>RequestOutputPool::allocate</code>,   <code>RequestOutputPool::release</code>,   lines
+    64–80.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [10]<span class="bibsp">   </span></span><a id="Xdeepinfer-output-binding"></a>DeepSeek-AI. <em>Request output Python binding</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_output.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_output.cpp</code></a>.
+    <code>RequestOutput.clone     </code>implementation:        lines        16–18;        declaration:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/_C/engine.pyi#L182"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/_C/engine.pyi#L182</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [11]<span class="bibsp">   </span></span><a id="Xvllm-sequence"></a>vLLM            contributors.            <em>Sequence           definitions</em>,            v0.6.3.
+    <a class="url" href="https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/sequence.py#L625"><code>https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/sequence.py#L625</code></a>.
+    Symbol: <code>SequenceGroup</code>. A historical comparison, not an identified fork point.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [12]<span class="bibsp">   </span></span><a id="Xvllm-engine"></a>vLLM contributors. <em>LLM engine</em>, v0.6.3. <a class="url" href="https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/engine/llm_engine.py#L1284"><code>https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/engine/llm_engine.py#L1284</code></a>.
+    Symbol: <code>LLMEngine.step</code>; its docstring describes freeing sequence groups.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [13]<span class="bibsp">   </span></span><a id="Xvllm-scheduler"></a>vLLM contributors. <em>Scheduler</em>, v0.6.3. <a class="url" href="https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/core/scheduler.py"><code>https://github.com/vllm-project/vllm/blob/fd47e57f4b0d5f7920903490bce13bc9e49d8dba/vllm/core/scheduler.py</code></a>.
+    Queues:  lines  340–348;  preemption  selection:  lines  1472–1499;  recomputation:  lines
+    1501–1510; swap-out: lines 1529–1543. Compared with DeepInfer’s pinned scheduler,
+    not an identified ancestor revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [14]<span class="bibsp">   </span></span><a id="Xdeepinfer-flops"></a>DeepSeek-AI. <em>Main-model FLOPs estimator</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp</code></a>.
     Symbols:  <code>flops_coef</code>,  <code>FlopsEstimator::calc_flops</code>,  lines  13–45.  Replay  query
     ranges and cost terms: lines 237–320.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [6]<span class="bibsp">   </span></span><a id="Xdeepinfer-benchmark"></a>DeepSeek-AI. <em>Offline benchmark</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py</code></a>.
+ [15]<span class="bibsp">   </span></span><a id="Xdeepinfer-benchmark"></a>DeepSeek-AI. <em>Offline benchmark</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/benchmark.py</code></a>.
     Symbols:  <code>measure_decode</code>,  <code>run_decode_step</code>;  endpoint  storage,  lines  380–381;
     measurement and profile windows, lines 499–519; token-accounting comments, lines
     405, 407 and 539; topology and rank-0 reporting, lines 71–76 and 521–560; YOCO
     mask-mode option, lines 45–50.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [7]<span class="bibsp">   </span></span><a id="Xdeepinfer-launch"></a>DeepSeek-AI. <em>Data-parallel process launcher</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py</code></a>.
+ [16]<span class="bibsp">   </span></span><a id="Xdeepinfer-launch"></a>DeepSeek-AI. <em>Data-parallel process launcher</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_launch.py</code></a>.
     Symbols: <code>launch_dp</code>, <code>run_dp</code>.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [8]<span class="bibsp">   </span></span><a id="Xdeepinfer-config"></a>DeepSeek-AI. <em>Example engine configuration</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py</code></a>.
+ [17]<span class="bibsp">   </span></span><a id="Xdeepinfer-config"></a>DeepSeek-AI. <em>Example engine configuration</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_config.py</code></a>.
     Symbol: <code>setup_cuda_visible_devices</code>, lines 55–64. Example chunked-prefill setting
     and caller overrides: lines 118–123.
     </p>
 <p class="bibitem"><span class="biblabel">
-  [9]<span class="bibsp">   </span></span><a id="Xroofline"></a>Samuel Williams, Andrew Waterman and David Patterson. <em>Roofline: An Insightful
+ [18]<span class="bibsp">   </span></span><a id="Xroofline"></a>Samuel Williams, Andrew Waterman and David Patterson. <em>Roofline: An Insightful
     Visual Performance Model for Multicore Architectures</em>. Communications of the ACM,
     52(4), 2009, pp. 65–76. <a class="url" href="https://doi.org/10.1145/1498765.1498785"><code>https://doi.org/10.1145/1498765.1498785</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [19]<span class="bibsp">   </span></span><a id="Xattention"></a>Ashish  Vaswani  et  al.  <em>Attention  Is  All  You  Need</em>.  2017.  Section  3.2.1:  scaled
+    dot-product attention. <a class="url" href="https://arxiv.org/abs/1706.03762"><code>https://arxiv.org/abs/1706.03762</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [20]<span class="bibsp">   </span></span><a id="Xdeepinfer-model"></a>DeepSeek-AI. <em>DeepSeek model execution</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py</code></a>.
+    Symbol:   <code>DeepseekModel.forward</code>,   lines   154–248.   Wrapper   sampling   handoff:
+    <code>DeepseekForCausalLM.sample</code>,  lines  383–401.  YOCO  compatibility  checks:  lines
+    117–138.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [21]<span class="bibsp">   </span></span><a id="Xdeepinfer-decoder"></a>DeepSeek-AI. <em>Decoder layer</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/decoder_layer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/decoder_layer.py</code></a>.
+    V4 attention construction: line 85; attention call: lines 155–161. Feed-forward call:
+    lines 169–173. Full/compact boundary normalisation: lines 134–152.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [22]<span class="bibsp">   </span></span><a id="Xdeepinfer-attention"></a>DeepSeek-AI. <em>V4 attention runtime</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py</code></a>.
+    Class: <code>V4Attention</code>. Query and SWA projection: lines 386–464; decode attention: lines
+    628–670; forward path: lines 752–880. Full-source block KV: <code>_store_yoco_full_kv</code>,
+    lines 672–721.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [23]<span class="bibsp">   </span></span><a id="Xdeepinfer-cache"></a>DeepSeek-AI.           <em>Cache          engine          and          state          layout</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py</code></a>.
+    Format    selection:    lines    46–56;    ring    sizes:    lines    88–110;    stored/dropped
+    classification:   lines   113–116;   SWA   byte   budgets:   lines   261–280;   cache   view:
+    lines   407–422;   state-slot   count:   lines   201–202;   cache   fields:   lines   206–219;
+    <code>StateBlock</code>: lines 221–241 and 306; <code>select_state_slice_to_store</code>: lines 763–817;
+    <code>load_state_from_store_to_prefill_cache</code>: lines 821–848.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [24]<span class="bibsp">   </span></span><a id="Xdeepinfer-cache-format"></a>DeepSeek-AI. <em>KV-cache formats</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cache_common.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cache_common.py</code></a>.
+    Symbols: <code>KVCacheFormat</code>, <code>V41_FORMAT</code>, lines 24–137, including main FP8/FP4 and
+    index FP4 formats.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [25]<span class="bibsp">   </span></span><a id="Xdeepinfer-metadata"></a>DeepSeek-AI. <em>Attention metadata</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/input_metadata.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/input_metadata.py</code></a>.
+    V4  attention  information:  lines  343–385.  CUDA  decode  address  construction:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/prepare_decode_metadata.py#L138"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/prepare_decode_metadata.py#L138</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [26]<span class="bibsp">   </span></span><a id="Xdeepinfer-indices"></a>DeepSeek-AI. <em>KV index expansion</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/get_kv_index.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/get_kv_index.py</code></a>.
+    Decode      SWA      wrapper:      lines      97–112.      CUDA      ring      branch:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/get_kv_index.py#L59"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/get_kv_index.py#L59</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [27]<span class="bibsp">   </span></span><a id="Xdeepinfer-attention-backend"></a>DeepSeek-AI. <em>Attention backend</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/attention_backend.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/attention_backend.py</code></a>.
+    Symbol: <code>decode_mla_mqa_sparse</code>, lines 77–146.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [28]<span class="bibsp">   </span></span><a id="Xdeepseek-v2"></a>DeepSeek-AI.                                                                        <em>DeepSeek-V2:
+    A  Strong,  Economical,  and  Efficient  Mixture-of-Experts  Language  Model</em>.  2024.
+    <a class="url" href="https://arxiv.org/html/2405.04434v5#S2.SS1.SSS2"><code>https://arxiv.org/html/2405.04434v5#S2.SS1.SSS2</code></a>.  Sections  2.1.2–2.1.3:  joint
+    KV compression and the separately cached position-encoding component.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [29]<span class="bibsp">   </span></span><a id="Xdeepinfer-mla"></a>DeepSeek-AI. <em>MLA model projections</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mla_attn.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mla_attn.py</code></a>.
+    Low-rank projection container: lines 26–59; value and shared KV projections: lines
+    224–245. Runtime output projection: <code>_wv_and_o_proj </code>in reference <span class="cite">[<a href="references.html#Xdeepinfer-attention">22</a>]</span>, lines 191–225.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [30]<span class="bibsp">   </span></span><a id="Xdeepinfer-environ"></a>DeepSeek-AI. <em>Environment defaults</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/environ.py</code></a>.
+    Draft  limit  and  backtracking  allowance:  lines  129–132;  extra  state  storage:  lines
+    163–164; YOCO options: lines 188–194.
+                                                                                  
+                                                                                  
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [31]<span class="bibsp">   </span></span><a id="Xdeepinfer-verification"></a>DeepSeek-AI.      <em>Verification     query     counts     and     decode     dispatch</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L150"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L150</code></a>.
+    Fixed-length  query  count:  lines  150–158.  The  scheduler  in  reference <span class="cite">[<a href="references.html#Xdeepinfer-scheduler">8</a>]</span>  marks
+    decode  as  non-prompt  at  lines  651–659  and  transfers  that  flag  at  line  707.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L120"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L120</code></a>.
+    Input-metadata construction: lines 120–146; CUDA query positions: reference <span class="cite">[<a href="references.html#Xdeepinfer-metadata">25</a>]</span>,
+    kernel lines 112–144.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [32]<span class="bibsp">   </span></span><a id="Xpaged-attention"></a>Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao
+    Yu, Joseph E. Gonzalez, Hao Zhang and Ion Stoica. Efficient memory management
+    for  large  language  model  serving  with  PagedAttention.  In  <em>Proceedings of the 29th
+    Symposium on Operating Systems Principles (SOSP)</em>, 2023.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [33]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler-memory"></a>DeepSeek-AI. <em>Scheduler memory ownership</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp</code></a>.
+    Joint checks and state cloning: lines 194–212; forked admission: lines 412–437 and
+    602–618; prompt allocation: lines 518–519; decode extension and preemption: lines
+    629–640; step key length: line 697; release: lines 738–745; <code>_append_slot</code>: lines 817–828;
+    processed-count correction: lines 927 and 998–999; <code>fork_seq</code>: lines 1061–1122; block
+    copies: lines 1288–1300.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [34]<span class="bibsp">   </span></span><a id="Xdeepinfer-block-manager"></a>DeepSeek-AI. <em>Block and state-slot allocator</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/block_manager.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/block_manager.hpp</code></a>.
+    Symbols: <code>Blocks</code>, lines 27–117; <code>BlockManager::can_allocate_nolock</code>, lines 128–136;
+    <code>BlockManagerMutexAcquire::allocate_seq</code>, lines 207–214.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [35]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler-binding"></a>DeepSeek-AI.         <em>Scheduler       and       allocator       Python       bindings</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_scheduler.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_scheduler.cpp</code></a>.
+    <code>unpin_blocks </code>bound to <code>BlockManager::free_blocks</code>: line 68.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [36]<span class="bibsp">   </span></span><a id="Xdeepinfer-memory-profile"></a>DeepSeek-AI. <em>Worker memory profiling</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py</code></a>.
+    State reservation and block count: lines 237–246; cross-rank result: lines 264–267.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [37]<span class="bibsp">   </span></span><a id="Xdeepinfer-scheduler-policy"></a>DeepSeek-AI.     <em>Scheduler    admission,    step    selection    and    preemption</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp</code></a>.
+    Prefill  cache  watermark:  line  80;  completion-engine  restriction:  lines  102–104;  step
+    selection: lines 275–345; prefill counter reset: lines 675–680; prompt admission and
+    chunking: lines 351–553; decode ordering: lines 624–659; metadata construction: lines
+                                                                                  
+                                                                                  
+    688–728; preemption: lines 766–790; stale-result comment and guard: lines 917–924;
+    unfinished-chunk  requeue:  lines  1016–1019.  State  reset  helpers:  reference <span class="cite">[<a href="references.html#Xdeepinfer-sequence">6</a>]</span>,  lines
+    134–142, 223–227, 258–261 and 307–311.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [38]<span class="bibsp">   </span></span><a id="Xdeepinfer-prefill-input"></a>DeepSeek-AI. <em>V4 input preparation</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</code></a>.
+    Prefill  SWA  write  destinations:  lines  98–109;  YOCO  visibility:  lines  149–170;
+    truncation metadata: lines 203–271; <code>update_yoco_prompt_v4</code>: lines 349–360.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [39]<span class="bibsp">   </span></span><a id="Xdeepinfer-engine-args"></a>DeepSeek-AI. <em>Engine construction arguments</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py</code></a>.
+    Preemption, engine-type and chunking defaults: lines 40–42.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [40]<span class="bibsp">   </span></span><a id="Xdeepinfer-zos"></a>DeepSeek-AI. <em>ZOS input preparation</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/zos.cpp</code></a>.
+    Fresh-row     tokens:     lines     99–113;     <code>prepare_zos_inputs</code>:     lines     142–196;
+    <code>update_metadata_for_sampling_zos</code>: lines 279–305.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [41]<span class="bibsp">   </span></span><a id="Xdeepinfer-zos-state"></a>DeepSeek-AI.        <em>Worker       step       state       and       ZOS       metadata</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/zos_status.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/zos_status.py</code></a>.
+    <code>WorkerStepState</code>: lines 9–20; <code>MetadataZOS</code>: lines 23–40.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [42]<span class="bibsp">   </span></span><a id="Xdeepinfer-zos-tokens"></a>DeepSeek-AI. <em>ZOS token gathering</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/gather_input_ids_zos.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/gather_input_ids_zos.py</code></a>.
+    <code>gather_input_ids_zos       </code>contract:            lines            10–32.            Caller:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py</code></a>,
+    <code>prepare_token_ids_zos</code>, lines 181–244.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [43]<span class="bibsp">   </span></span><a id="Xdeepinfer-seqlens-k"></a>DeepSeek-AI. <em>ZOS key-length correction</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compute_seqlens_k_zos.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compute_seqlens_k_zos.py</code></a>.
+    Kernel wrapper and formula: lines 10–33; reference implementation: lines 35–52.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [44]<span class="bibsp">   </span></span><a id="Xdeepinfer-engine-type"></a>DeepSeek-AI.           <em>Engine          types          and          ZOS          default</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py</code></a>.
+    Default ZOS engine types: lines 16–17. Environment default applied in reference <span class="cite">[<a href="references.html#Xdeepinfer-engine-args">39</a>]</span>,
+    lines 51–55.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [45]<span class="bibsp">   </span></span><a id="Xdeepinfer-graph"></a>DeepSeek-AI. <em>CUDA graph runner</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cuda_graph_runner.py</code></a>.
+    Graph      data      contract:      lines      26–38;      batch-size      buckets:      lines
+                                                                                  
+                                                                                  
+    41–51;     selection     and     replay:     lines     143–154.     Runner     construction:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py</code></a>,
+    lines 72–79; YOCO keep-length assertion: lines 107–113.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [46]<span class="bibsp">   </span></span><a id="Xdeepinfer-timer"></a>DeepSeek-AI. <em>Host and device timers</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/timer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/timer.py</code></a>.
+    <code>CPUTimer.record</code>: lines 50–63; <code>CUDAGraphTimer.flush_out</code>: lines 196–212.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [47]<span class="bibsp">   </span></span><a id="Xdeepinfer-moe"></a>DeepSeek-AI. <em>V4 MoE execution</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py</code></a>.
+    Fused-path    condition:    lines    184–188;    slot    counts:    lines    196–202;    gate:
+    lines    359–401;    routed    experts:    lines    406–459;    dispatch:    lines    461–491;
+    combine:    lines    493–511;    shared    expert:    lines    513–526;    fused    path:
+    lines     528–563;     <code>forward</code>:     lines     565–616.     Communication     SM     limit:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/userbuffer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/userbuffer.py</code></a>,
+    lines 40–51.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [48]<span class="bibsp">   </span></span><a id="Xdeepinfer-eplb"></a>DeepSeek-AI. <em>Expert load balancer</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py</code></a>.
+    Slot     padding:     lines     21–28;     initial     map:     lines     31–39;     state     and
+    window:     lines     42–129;     <code>step</code>:     lines     131–165;     <code>_rearrange_experts</code>:
+    lines     222–288;     per-layer     views:     lines     346–376.     Step     call     site:
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py</code></a>,
+    lines 402–404.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [49]<span class="bibsp">   </span></span><a id="Xdeepinfer-eplb-policy"></a>DeepSeek-AI. <em>EPLB policy</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py</code></a>.
+    <code>_batch_greedy_indices</code>: lines 12–70; <code>rebalance_experts_global</code>: lines 73–140.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [50]<span class="bibsp">   </span></span><a id="Xdeepinfer-eplb-shuffle"></a>DeepSeek-AI. <em>EPLB weight shuffle</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py</code></a>.
+    Point-to-point path: lines 65–147; intranode mirror path: lines 150–218.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [51]<span class="bibsp">   </span></span><a id="Xdeepinfer-model-loader"></a>DeepSeek-AI. <em>Model loader</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/model_loader.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/model_loader.py</code></a>.
+    Redundant-slot resolution: lines 83–107 and 122–123.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [52]<span class="bibsp">   </span></span><a id="Xdeepgemm-gate"></a>DeepSeek-AI. <em>DeepGEMM SM100 mega gate</em>. <a class="url" href="https://github.com/deepseek-ai/DeepGEMM/blob/1fc9c66975ee322d628b3288534ca0e9ce12a64d/deep_gemm/include/deep_gemm/epilogue/sm100_mega_gate.cuh"><code>https://github.com/deepseek-ai/DeepGEMM/blob/1fc9c66975ee322d628b3288534ca0e9ce12a64d/deep_gemm/include/deep_gemm/epilogue/sm100_mega_gate.cuh</code></a>.
+    Replica  choice:  lines  204–206.  Commit  pinned  by  DeepInfer’s  <span class="path"><code>vendor/DeepGEMM</code></span>
+    submodule at the book’s source edition.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [53]<span class="bibsp">   </span></span><a id="Xtile-kernels-gate"></a>DeepSeek-AI.  <em>TileKernels  2.1.0  top-k  gate</em>.  Package  <code>tile-kernels==2.1.0</code>,
+    required by DeepInfer’s <span class="path"><code>requirements.txt</code></span>, line 17. File <span class="path"><code>tile_kernels/moe/moe_to
+    pk_gate_forward_cuda.py</code></span>: replica choice at lines 41 and 282–284. Package and file
+    hashes are recorded in <span class="path"><code>source-manifest.json</code></span>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [54]<span class="bibsp">   </span></span><a id="Xdeepseek-eplb-standalone"></a>DeepSeek-AI. <em>Expert Parallelism Load Balancer</em>, standalone repository, commit
+    <code>d52c72d</code>. <a class="url" href="https://github.com/deepseek-ai/EPLB/blob/d52c72d5b2f2fb4c41afbf8eb21366820239913d/eplb.py"><code>https://github.com/deepseek-ai/EPLB/blob/d52c72d5b2f2fb4c41afbf8eb21366820239913d/eplb.py</code></a>.
+    Scalar    packing:     lines    27–40;     replica    allocation:     lines    58–71;     entry
+    point      and      topology      selection:      lines      131–162.      The      README
+    describes      load      prediction      as      outside      the      repository’s      scope:
+    <a class="url" href="https://github.com/deepseek-ai/EPLB/blob/d52c72d5b2f2fb4c41afbf8eb21366820239913d/README.md"><code>https://github.com/deepseek-ai/EPLB/blob/d52c72d5b2f2fb4c41afbf8eb21366820239913d/README.md</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [55]<span class="bibsp">   </span></span><a id="Xdeepinfer-dependencies"></a>DeepSeek-AI.  <em>DeepInfer  dependency  declarations</em>,  at  the  book’s  fixed  revision.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/.gitmodules"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/.gitmodules</code></a>;
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/requirements.txt"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/requirements.txt</code></a>.
+    The  gitlinks  pin  DeepGEMM  and  DeepEP;  requirements  pin  TileKernels  2.1.0.
+    Versions and inspected file hashes are recorded in <span class="path"><code>source-manifest.json</code></span>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [56]<span class="bibsp">   </span></span>
+<a id="Xspeculative-leviathan"></a>Yaniv Leviathan, Matan Kalman and Yossi Matias. <em>Fast Inference from Transformers
+    via Speculative Decoding</em>. ICML, PMLR 202, 19274–19286, 2023. Algorithm 1 and
+    Appendix A.1. <a class="url" href="https://proceedings.mlr.press/v202/leviathan23a.html"><code>https://proceedings.mlr.press/v202/leviathan23a.html</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [57]<span class="bibsp">   </span></span><a id="Xspeculative-chen"></a>Charlie  Chen,  Sebastian  Borgeaud,  Geoffrey  Irving,  Jean-Baptiste  Lespiau,
+    Laurent Sifre and John Jumper. <em>Accelerating Large Language Model Decoding with
+    Speculative Sampling</em>. 2023. Algorithm 2 and the distribution-preservation argument.
+    <a class="url" href="https://arxiv.org/abs/2302.01318"><code>https://arxiv.org/abs/2302.01318</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [58]<span class="bibsp">   </span></span><a id="Xdeepinfer-verifier"></a>DeepSeek-AI.     <em>Speculative    verification    and    accepted-prefix    collection</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py</code></a>,
+    <code>Sampler._verification</code>,  beginning  at  line  411.  <code>Sampler.forward</code>,  lines  114–144,
+    selects  hidden  rows  and  computes  logits  before  verification  or  ordinary  sampling.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py</code></a>,
+    acceptance:   lines   378–399;   residual:   lines   435–445;   fallback:   lines   506–518.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/sampler.py</code></a>,
+    <code>prepare_verification_metadata_tl</code>,            <code>get_accept_result_tl        </code>and
+    <code>finalize_verification_tl</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [59]<span class="bibsp">   </span></span><a id="Xdeepinfer-sampling-inputs"></a>DeepSeek-AI.    <em>Sampling   transforms   and   proposal   vocabulary   alignment</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler_utils.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler_utils.py</code></a>,
+    <code>process_sampling</code>, lines 113–197. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py</code></a>,
+    <code>remap_draft_topk</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [60]<span class="bibsp">   </span></span><a id="Xdeepinfer-sampling-penalty"></a>DeepSeek-AI.   <em>Draft   probability   penalty   and   its   ideal-arithmetic   bound</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/common.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/common.py</code></a>.
+    Docstring: lines 3–21; <code>DRAFT_PROB_PENALTY</code>: line 53.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [61]<span class="bibsp">   </span></span><a id="Xdeepinfer-fixed-sampling"></a>DeepSeek-AI. <em>Fixed-point sampling helpers</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/random_sampling.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/random_sampling.py</code></a>.
+    Symbols: <code>Config</code>, <code>float_to_fixed</code>, <code>accumulate</code>, <code>sample_offset</code>, <code>sample_select</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [62]<span class="bibsp">   </span></span><a id="Xdeepinfer-mtp-budget"></a>DeepSeek-AI.     <em>Variable    verification    budget    and    runtime    estimates</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp</code></a>.
+    Estimators:   lines   19–132;   runtime   update:   lines   140–148;   <code>schedule</code>:   lines
+    150–267;   confidence-round   comment:   lines   159–167.   CPU   prefix   products:
+    <span class="path"><code>csrc/engine/scheduler.hpp</code></span>,  lines  1239–1250,  at  the  same  fixed  revision
+    (reference <span class="cite">[<a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>).
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [63]<span class="bibsp">   </span></span><a id="Xdeepinfer-mtp-profile"></a>DeepSeek-AI.             <em>Startup           decode           performance           curve</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py</code></a>,
+    <code>profile_decode_perf</code>, lines 562–631. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py</code></a>,
+    <code>warm_up_model</code>, lines 275–281. Feedback: <span class="path"><code>deepinfer/engine/llm_engine.py</code></span>, lines
+    995–1002, at the same revision (reference <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>]</span>).
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [64]<span class="bibsp">   </span></span><a id="Xdeepinfer-dflash"></a>DeepSeek-AI.        <em>DFlash       proposal       generation       and       confidence</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py</code></a>.
+    Input embedding, draft forward and sampling: lines 230–345.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [65]<span class="bibsp">   </span></span><a id="Xdeepinfer-mtp-pool"></a>DeepSeek-AI. <em>Stored MTP proposals</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/mtp_info_pool.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/mtp_info_pool.py</code></a>.
+    <code>MTPInfoPool</code>: slot layout, reserved slot zero and <code>store</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [66]<span class="bibsp">   </span></span><a id="Xdeepinfer-confidence-allocation"></a>DeepSeek-AI.     <em>Device     allocation     of     a     fixed     verification     budget</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py</code></a>.
+    <code>compute_seqlens_q_by_confidence_rates_tl</code>,  lines  14–83.  Call  and  D2H  event:
+                                                                                  
+                                                                                  
+    <span class="path"><code>deepinfer/worker/worker.py</code></span>,  lines  195–234;  sampling  metadata  update:  lines
+    146–152 (reference <span class="cite">[<a href="references.html#Xdeepinfer-worker">7</a>]</span>).
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [67]<span class="bibsp">   </span></span><a id="Xdeepinfer-confidence-metric"></a>DeepSeek-AI. <em>Verification confidence metric</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py</code></a>,
+    <code>compute_confidence_error_ref</code>,      lines      584–589.      CUDA      accumulation:
+    <span class="path"> <code>tilelang_ops/cuda/sampler.py</code></span>,   lines   368–374;   probability   proxy:
+    <span class="path"><code>tilelang_ops/cuda/fused_sample.py</code></span>, lines 471–479 and 520–522 (reference <span class="cite">[<a href="references.html#Xdeepinfer-verifier">58</a>]</span>).
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/stats_logger.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/stats_logger.py</code></a>,
+    normalisation: lines 234–236; reported name: line 309.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [68]<span class="bibsp">   </span></span><a id="Xyoco-paper"></a>Yutao            Sun            et            al.            <em>You          Only          Cache
+    Once: Decoder-Decoder Architectures for Language Models</em>. 2024, arXiv:2405.05254v1,
+    sections 2.2–2.3. <a class="url" href="https://arxiv.org/html/2405.05254v1#S2.SS2"><code>https://arxiv.org/html/2405.05254v1#S2.SS2</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [69]<span class="bibsp">   </span></span><a id="Xdeepseek-v41"></a>DeepSeek-AI.                <em>DeepSeek-V4.1-Flash:              Pushing              the
+    Limits of KV Cache Compression</em>. 2026, arXiv:2609.19969v1, sections 2.2, 3.2.2 and
+    4.2.1. <a class="url" href="https://arxiv.org/html/2609.19969v1#S2.SS2"><code>https://arxiv.org/html/2609.19969v1#S2.SS2</code></a>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [70]<span class="bibsp">   </span></span><a id="Xdeepinfer-hf-yoco"></a>DeepSeek-AI.            <em>Hugging          Face          configuration          adapter</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/config.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/hugging_face/config.py</code></a>.
+    SWA shared-hidden default: line 47; segmented maps: lines 66–85; <code>_n_prefill_layer</code>:
+    lines 158–161; window mapping: line 284.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [71]<span class="bibsp">   </span></span><a id="Xdeepinfer-yoco-runtime"></a>DeepSeek-AI.        <em>YOCO       runtime       predicates       and       compaction</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/yoco.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/yoco.py</code></a>.
+    <code>is_yoco_consumer_layer</code>: lines 19–21; <code>compact_yoco_boundary</code>: lines 93–123.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [72]<span class="bibsp">   </span></span><a id="Xdeepinfer-cross-layer"></a>DeepSeek-AI.        <em>Cross-layer       sharing       topology       and       runtime</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/cross_layer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/cross_layer.py</code></a>.
+    Boundary validation: lines 114–116; <code>CrossLayerRuntime</code>: lines 277–325.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [73]<span class="bibsp">   </span></span><a id="Xdeepinfer-yoco-metadata"></a>DeepSeek-AI. <em>YOCO input metadata views</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/yoco.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/yoco.py</code></a>.
+    <code>get_mask_view</code>:    lines    84–92;    <code>get_consumer_view</code>:    lines    94–128    for    the
+    single-context-rank path, with redistribution below.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [74]<span class="bibsp">   </span></span><a id="Xdeepinfer-replay-cost-tests"></a>DeepSeek-AI.             <em>FLOPs           estimator           reference           checks</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/engine/test_flops_estimator.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/engine/test_flops_estimator.py</code></a>.
+    Fixture:  lines  26–31;  per-query  reference:  lines  34–145;  mode,  chunk  and  Engram
+    cases: lines 148–178. Inspected, not run for this book.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [75]<span class="bibsp">   </span></span><a id="Xdeepinfer-yoco-checks"></a>DeepSeek-AI.          <em>YOCO         mask/compact         equivalence         checks</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/yoco/README.md"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/yoco/README.md</code></a>.
+    Driver: <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/yoco/yoco_equiv.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/yoco/yoco_equiv.py</code></a>.
+    Baseline selection: line 536; baseline validation: lines 793–797. Full-vocabulary guard:
+    line 566; temperature/top-p: lines 674–675. Inspected, not run for this book.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [76]<span class="bibsp">   </span></span><a id="Xdeepinfer-invariant-runtime"></a>DeepSeek-AI.     <em>Batch-invariance    configuration    and    library    boundaries</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/runtime_config.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/runtime_config.py</code></a>,
+    lines  54–69.  Attention  predicates  and  calls:  <span class="path"><code>deepinfer/model_executor/
+    models/v4_modules/attn.py</code></span>,  lines  87–92,  666  and  1002  (reference <span class="cite">[<a href="references.html#Xdeepinfer-attention">22</a>]</span>).
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/userbuffer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/userbuffer.py</code></a>,
+    lines 72–80. FlashMLA imports and sparse-decode flag forwarding: <span class="path"><code>deepinfer/model
+    _executor/layers/attention_backend.py</code></span>, lines 2 and 141; direct fused-operation
+    import: <span class="path"><code>deepinfer/model_executor/models/v4_modules/attn.py</code></span>, line 14. The
+    gitlink at <span class="path"><code>vendor/FlashMLA</code></span> pins <code>2e5429fc5653bab6e081f09477126f731882a6a9</code>;
+    <span class="path"><code>.gitmodules</code></span> identifies the DeepSeek repository. All caller evidence and the gitlink
+    are from the same DeepInfer revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [77]<span class="bibsp">   </span></span><a id="Xdeepinfer-contract-tests"></a>DeepSeek-AI. <em>Released numerical model checks</em>. Inspected, not run for this book.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_batch_invariant.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_batch_invariant.py</code></a>,
+    result    fields    at    lines    41–47    and    golden    replay    at    lines    96–105.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_ve_batch_invariant.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_ve_batch_invariant.py</code></a>,
+    embedding comparison at lines 113–127. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_kl.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_kl.py</code></a>,
+    golden  generation  at  lines  80–82;  comparison  at  lines  177–209.  Prompt  sampling
+    parameters: <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/prepare_sample.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/prepare_sample.cpp</code></a>,
+    lines  186–188;  prompt-logprob  calculation:  <span class="path"><code>deepinfer/model_executor/
+    layers/sampler_utils.py</code></span>,  lines  52–78.  Temperature,  top-p/top-k  and
+    log-softmax  reference:  <span class="path"><code>deepinfer/model_executor/layers/tilelan
+    g_ops/fused_sample.py</code></span>,   lines   137–150   and   209–211   (reference <span class="cite">[<a href="references.html#Xdeepinfer-random-keys">79</a>]</span>).
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/testing.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/testing.py</code></a>,
+    <code>cal_diff</code>, lines 4–12. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_offline_inference.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_offline_inference.py</code></a>,
+    platform configuration and stored <span class="path"><code>offline_decode_ppl.json</code></span> comparison.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [78]<span class="bibsp">   </span></span><a id="Xdeepinfer-golden-sampling"></a>DeepSeek-AI.        <em>Golden       overrides       and       verification       metadata</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py</code></a>,
+    reference   metadata   at   lines   13–25   and   override   at   lines   227–250.   CUDA
+                                                                                  
+                                                                                  
+    implementation: <span class="path"><code>deepinfer/model_executor/layers/tilelang_ops/cuda/sampler
+    .py</code></span>, lines 252–276, at the same revision (reference <span class="cite">[<a href="references.html#Xdeepinfer-verifier">58</a>]</span>).
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [79]<span class="bibsp">   </span></span><a id="Xdeepinfer-random-keys"></a>DeepSeek-AI.         <em>Sampling        keys        and        evaluation        defaults</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/fused_sample.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/fused_sample.py</code></a>,
+    MTP  offset  at  line  15  and  namespace  selection  at  lines  93  and  208.  CUDA  keys:
+    <span class="path"><code>tilelang_ops/cuda/fused_sample.py</code></span>, lines 227, 392, 450 and 481 (relative to
+    <span class="path"><code>deepinfer/model_executor/layers/</code></span>; reference <span class="cite">[<a href="references.html#Xdeepinfer-verifier">58</a>]</span>). Packed positions: <span class="path"><code>tilelan
+    g_ops/sampler.py</code></span>, lines 56–66, and <span class="path"><code>tilelang_ops/common.py</code></span>, line 52; expansion
+    caller: <span class="path"><code>sampler_utils.py</code></span>, lines 162–163 (reference <span class="cite">[<a href="references.html#Xdeepinfer-sampling-inputs">59</a>]</span>). DFlash proposal positions:
+    <span class="path"><code>deepinfer/model_executor/models/mtp/dflash.py</code></span>, lines 290–294 (reference <span class="cite">[<a href="references.html#Xdeepinfer-dflash">64</a>]</span>).
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/run_eval.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/eval/run_eval.py</code></a>,
+    <code>per_sample_seed </code>and <code>_setup_env</code>, including lines 121–129.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [80]<span class="bibsp">   </span></span><a id="Xdeepinfer-statistical-test"></a>DeepSeek-AI.         <em>Randomised        PIT        and        sampler        checks</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_sampler.py</code></a>,
+    settings at lines 39–45, statistical helpers at lines 50–94 (trajectory rejection filter at
+    lines 85–88), and failure conditions at lines 242–250. Inspected, not run for this book.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sum_smaller_probs.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sum_smaller_probs.py</code></a>,
+    inclusive CDF definition and reference at lines 10–44.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [81]<span class="bibsp">   </span></span><a id="Xdeepinfer-grammar-runtime"></a>DeepSeek-AI.    <em>Structured-output    matcher    state    and    sampling    masks</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/structure_output/matcher.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/structure_output/matcher.py</code></a>,
+    rollback     capacity     at     line     20;     token     acceptance,     masking     and
+    rollback      at      lines      134–235;      failed      futures      at      lines      297–338.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py</code></a>,
+    matcher updates at lines 339–386 and masking at lines 433–437. Engine enqueue failure:
+    <span class="path"><code>deepinfer/engine/llm_engine.py</code></span>, lines 621–622; scheduler failure/preemption:
+    <span class="path"><code>csrc/engine/scheduler.hpp</code></span>,  lines  769–788  and  973–980  (references <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>).
+    Trigger/bound interface: <span class="path"><code>deepinfer/sampling_params.py</code></span>, lines 39–43. XGrammar
+    version: <span class="path"><code>requirements.txt</code></span>, line 21, all at the same revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [82]<span class="bibsp">   </span></span><a id="Xdeepinfer-format-tests"></a>DeepSeek-AI.      <em>Structured-output     examples     and     format     assertions</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_structured_output.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_structured_output.py</code></a>,
+    settings at lines 37–41; termination and format assertions at lines 42–63. Invoked by
+    <span class="path"><code>tests/models/test_offline_inference.py</code></span> with <code>check_structured_output=True</code>.
+    Inspected, not run for this book.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [83]<span class="bibsp">   </span></span><a id="Xdeepinfer-service-roles"></a>DeepSeek-AI.    <em>Engine    roles    and    the    offline    measurement    boundary</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/arg_utils.py</code></a>,
+                                                                                  
+                                                                                  
+    NORMAL    default    at    line    41.    Prompt-only    assertion:    <span class="path"> <code>d e e p i n f e r
+    / e n g i n e / l l m _ e n g i n e . p y</code></span>,   lines   947–949,   at   the   same   revision.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/README.md</code></a>,
+    “Stage decoupling and metrics”. Benchmark construction: <span class="path"><code>examples/benchmark.py</code></span>,
+    lines 173–188; example factory: <span class="path"><code>examples/_config.py</code></span>, lines 112–125, at the same
+    revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [84]<span class="bibsp">   </span></span><a id="Xdeepinfer-service-state"></a>DeepSeek-AI.       <em>State      selection,      restoration      and      layout      tests</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py</code></a>,
+    <code>select_state_slice_to_store</code>, lines 763–818; <code>load_state_from_store_to_prefill_cache</code>,
+    lines 821–848. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/worker/test_state_cache_ops.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/worker/test_state_cache_ops.py</code></a>,
+    padding removal at lines 76–84; round-trip comparison at lines 188–215. Inspected,
+    not executed for this book.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [85]<span class="bibsp">   </span></span><a id="Xdeepinfer-service-curves"></a>DeepSeek-AI.  <em>Performance  sweeps,  plotting  code  and  published  decode  figure</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py</code></a>,
+    record    selection    at    lines    37–55;    conversion    and    axes    at    lines    58–75;
+    subtitle     at     lines     91–100;     point     connection     at     line     150.     Sweep
+    driver:   <span class="path"> <code>examples/sweep/run_sweep.sh</code></span>,   at   the   same   revision.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/doc/images/decode_pareto.png</code></a>.
+    Chapter 11’s 246 tokens/s/user is an approximate visual reading at 64 requests per
+    DP rank, not a recovered benchmark record.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [86]<span class="bibsp">   </span></span><a id="Xdeepseek-service-projects"></a>DeepSeek-AI. <em>3FS </em>and <em>DeepSeek Recipe</em>. <a class="url" href="https://github.com/deepseek-ai/3FS"><code>https://github.com/deepseek-ai/3FS</code></a>;
+    <a class="url" href="https://github.com/deepseek-ai/deepseek-recipe"><code>https://github.com/deepseek-ai/deepseek-recipe</code></a>.  Public  project  boundaries
+    checked on 22 October 2026. The DeepInfer deployment Q&amp;A does not identify the
+    deployed revisions; this book does not inspect their internal service implementations.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [87]<span class="bibsp">   </span></span><a id="Xdeepinfer-compressor"></a>DeepSeek-AI. <em>Runtime temporal compression</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/compress.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/compress.py</code></a>,
+    <code>KProject </code>and <code>Compressor</code>, especially lines 74–167. Projection: <span class="path"><code>deepinfer/model_e
+    xecutor/layers/mla_attn.py</code></span>, <code>SoftmaxAPEGatedColumnParallelLora</code>, at the same
+    revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [88]<span class="bibsp">   </span></span><a id="Xdeepinfer-compress-reference"></a>DeepSeek-AI.       <em>Compression      interfaces,      references      and      checks</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compress.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compress.py</code></a>,
+    <span class="path"><code>compress_and_update_state_prefill</code></span>, <span class="path"><code>compress_and_update_state_decode</code></span>,
+    reference formulas at lines 178–248, and device tests in the same file. Tests inspected,
+    not run. Live state allocation: <span class="path"><code>deepinfer/worker/cache_engine.py</code></span>, lines 123–133,
+    441–465, at the same revision.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [89]<span class="bibsp">   </span></span><a id="Xdeepinfer-compressed-metadata"></a>DeepSeek-AI.    <em>Compressed    positions,    store    slots    and    visible    lengths</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</code></a>,
+    lines 46–91 and 591–601.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [90]<span class="bibsp">   </span></span><a id="Xdeepinfer-index-runtime"></a>DeepSeek-AI.         <em>Index        attention        and        candidate        selection</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/index_attn.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/index_attn.py</code></a>,
+    <code>MQA</code>,  <code>store_index_kv</code>,  <code>compute_chunk_size</code>,  <code>_topk_prefill</code>,  <code>_topk_decode </code>and
+    candidate  selection.  Configuration:  <span class="path"><code>deepinfer/hugging_face/config.py</code></span>,  lines
+    111–134, at the same revision. Index scoring and top-k implementations in independent
+    libraries are identified at the import/call boundary, not audited here.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [91]<span class="bibsp">   </span></span><a id="Xdeepinfer-sharing-topology"></a>DeepSeek-AI.       <em>Segmented      sharing      maps      and      runtime      data</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/cross_layer.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/cross_layer.py</code></a>,
+    <code>SharedLayerTopology</code>, refinement checks at lines 181–189, and <code>CrossLayerRuntime</code>.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [92]<span class="bibsp">   </span></span><a id="Xdeepinfer-index-addresses"></a>DeepSeek-AI. <em>Paged index conversion</em>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/flash_mla_utils.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/flash_mla_utils.py</code></a>,
+    <code>convert_kv_index</code>; CUDA implementation in <span class="path"><code>deepinfer/model_executor/layers
+    /tilelang_ops/cuda/flash_mla_utils.py</code></span>, lines 31–37, at the same revision. The
+    kernel and tensor reference use the output lane’s position relative to the valid count;
+    they do not use a sentinel-value guard.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [93]<span class="bibsp">   </span></span><a id="Xdeepinfer-compressed-attention"></a>DeepSeek-AI.    <em>Main/index    KV    storage    and    sparse    attention    read</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py</code></a>,
+    main/index storage at lines 515–587; decode cache arguments and attention call at
+    lines 640–669; full-layout YOCO storage at lines 672–705.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [94]<span class="bibsp">   </span></span><a id="Xdeepinfer-atlas-processes"></a>DeepSeek-AI.       <em>Engine      drivers,      workers      and      rank      groups</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/base.py</code></a>,
+    <code>WorkerBase </code>rank setup and <code>run_workers</code>. <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/parallel_state.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/parallel_state.py</code></a>,
+    <code>ParallelProcessGroup.create_process_groups</code>.  At  the  same  revision:  <span class="path"><code>example
+    s/_launch.py</code></span>,  <code>run_dp</code>;  <span class="path"><code>examples/_config.py</code></span>,  <code>setup_cuda_visible_devices</code>;
+    <span class="path"><code>deepinfer/config.py</code></span>, <code>ParallelConfig</code>; <span class="path"><code>deepinfer/engine/llm_engine.py</code></span>,
+    <code>_init_workers</code>; <span class="path"><code>deepinfer/model_executor/layers/tilelang_ops/prepare_cp_m
+    irror.py</code></span>, lines 135–146; <span class="path"><code>csrc/engine/scheduler.hpp</code></span>, line 90.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [95]<span class="bibsp">   </span></span><a id="Xdeepinfer-atlas-model"></a>DeepSeek-AI.     <em>Model    registration,    wrappers    and    navigation    entries</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/__init__.py</code></a>,
+                                                                                  
+                                                                                  
+    <code>_MODELS</code>;   <span class="path"> <code>deepinfer/model_executor/models/deepseek_vl.py</code></span>,
+    <code>DeepseekVLForCausalLM.forward</code>,    at    the    same    revision.    Core    model:
+    <span class="path"><code>deepinfer/model_executor/models/deepseek.py</code></span>.  Navigation  only:
+    <span class="path"><code>deepinfer/model_executor/models/v4_modules/hc.py</code></span>, <code>HCLayerMixin</code>, <code>HCHead</code>;
+    <span class="path"><code>v4_modules/engram.py</code></span>, <code>EngramRuntime</code>; <span class="path"><code>v4_modules/builder.py</code></span> (the latter two
+    paths  relative  to  the  models  directory).  These  entries  do  not  evaluate  the  model
+    mechanisms or weight-loading implementation.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [96]<span class="bibsp">   </span></span><a id="Xdeepinfer-atlas-boundaries"></a>DeepSeek-AI.         <em>Native        scheduler        and        output        bindings</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_scheduler.cpp"><code>https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/pybind_scheduler.cpp</code></a>,
+    <code>schedule </code>and  <code>process_outputs </code>bindings.  At  the  same  revision:  <span class="path"><code>csrc/engine
+    /pybind_output.cpp</code></span>,  <code>build_request_outputs</code>;  <span class="path"><code>csrc/engine/outputs.hpp</code></span>,
+    <code>RequestOutputPool </code>and output construction.
+    </p>
+<p class="bibitem"><span class="biblabel">
+ [97]<span class="bibsp">   </span></span><a id="Xdeepinfer-atlas-layout"></a>DeepSeek-AI.         <em>Repository        layout        and        platform        dispatch</em>.
+    <a class="url" href="https://github.com/deepseek-ai/DeepInfer/tree/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01"><code>https://github.com/deepseek-ai/DeepInfer/tree/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01</code></a>.
+    Platform dispatch: <span class="path"><code>deepinfer/model_executor/layers/tilelang_ops/ops.py</code></span>;
+    platform selection: <span class="path"><code>deepinfer/platform.py</code></span>; dependency repositories: <span class="path"><code>.gitmodules</code></span>.
+    Directory entries in Appendix B are navigation, not a claim to have inspected all files
+    in each directory.
 </p>
 </div>
-</article><nav class="page-turn" aria-label="Sample pages"><a href="index.html"><small>PREVIOUS IN THIS SAMPLE</small>← Preface</a><a class="next" href="book.pdf"><small>CONTINUE READING</small>The complete book ↗</a></nav>
+
+</article><nav class="page-turn" aria-label="Book pages"><a href="glossary.html"><small>PREVIOUS</small>← Terms and abbreviations</a><a class="next" href="notice.html"><small>NEXT</small>Copyright and edition →</a></nav>
 <footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
 <a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
 Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
-<a href="COPYRIGHT.txt">Copyright and permissions</a> · Generated from the book’s LaTeX sources.</footer></main>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
 <aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

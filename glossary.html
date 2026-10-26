@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms and abbreviations · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link active" href="glossary.html" aria-current="page"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><h1 class="appendixHead" id="terms-and-abbreviations"><a id="x1-205000C"></a>Terms and abbreviations</h1>
+<p class="noindent"><a id="ref-app:terms"></a>
+</p><p class="indent">   These entries locate explanations; they do not replace the conditions attached to each
+mechanism. Chapter numbers refer to the main text; A and B refer to the technical
+appendices.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-81"><colgroup id="TBL-81-1g"><col id="TBL-81-1"/><col id="TBL-81-2"/><col id="TBL-81-3"/></colgroup><tr id="TBL-81-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Term</span> </p></td><td class="td11" id="TBL-81-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Meaning in this book</span> </p></td><td class="td10" id="TBL-81-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Where</span> </p></td>
+</tr><tr id="TBL-81-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Prefill
+/
+decode</span> </p></td><td class="td11" id="TBL-81-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Compute a prompt’s states / continue generating from cached
+  states. Verification can evaluate several positions per request in
+  a decode step.</span> </p></td><td class="td10" id="TBL-81-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">1, 8</span> </p></td>
+</tr><tr id="TBL-81-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">KV
+cache</span> </p></td><td class="td11" id="TBL-81-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Stored key/value information reused by attention. MLA changes
+  its representation; it need not contain two separate arrays.</span> </p></td><td class="td10" id="TBL-81-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">1, 3</span> </p></td>
+</tr><tr id="TBL-81-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">TTFT</span> </p></td><td class="td11" id="TBL-81-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Time  to  first  token,  including  waiting  and  work  before
+  publication.</span> </p></td><td class="td10" id="TBL-81-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">2</span> </p></td>
+</tr><tr id="TBL-81-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-5-1" style="text-align:left;"><p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math>
+<span class="ec-lmr-10">/
+SPS</span> </p></td><td class="td11" id="TBL-81-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Average useful output tokens per request per step / steps per
+  second. Their product gives per-request token rate under the
+  stated counting and measurement assumptions.</span> </p></td><td class="td10" id="TBL-81-5-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">2, 8, 11</span> </p></td>
+</tr><tr id="TBL-81-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-6-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Pareto
+frontier</span> </p></td><td class="td11" id="TBL-81-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Non-dominated  operating  points:  improving  one  objective
+  requires worsening another among the compared points.</span> </p></td><td class="td10" id="TBL-81-6-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">11</span> </p></td>
+</tr><tr id="TBL-81-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-7-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Roofline</span> </p></td><td class="td11" id="TBL-81-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">A  cost  bound  that  compares  arithmetic  work  with  memory
+  traffic; arithmetic intensity is operations per byte.</span> </p></td><td class="td10" id="TBL-81-7-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">2</span> </p></td>
+</tr><tr id="TBL-81-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-8-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">FLOP
+/
+MFU</span> </p></td><td class="td11" id="TBL-81-8-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Floating-point operation / model FLOPs utilisation. The chosen
+  operation count and hardware denominator matter.</span> </p></td><td class="td10" id="TBL-81-8-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">2</span> </p></td>
+</tr><tr id="TBL-81-9-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-9-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">MLA</span> </p></td><td class="td11" id="TBL-81-9-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Multi-head  Latent  Attention:  a  shared  compressed  latent
+  represents KV.</span> </p></td><td class="td10" id="TBL-81-9-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">3</span> </p></td>
+</tr><tr id="TBL-81-10-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-10-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">SWA</span> </p></td><td class="td11" id="TBL-81-10-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Sliding-window  attention:  a  query  sees  a  bounded  recent
+  interval.</span> </p></td><td class="td10" id="TBL-81-10-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">3</span> </p></td>
+</tr><tr id="TBL-81-11-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-11-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">RoPE</span> </p></td><td class="td11" id="TBL-81-11-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Rotary      position      embedding;      a      position-dependent
+  transformation of attention queries and keys.</span> </p></td><td class="td10" id="TBL-81-11-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">3</span> </p></td>
+</tr><tr id="TBL-81-12-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-12-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">C1
+/
+C2</span> </p></td><td class="td11" id="TBL-81-12-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">One completed cache row per one / two token positions. Distinct
+  from compression of a feature vector.</span> </p></td><td class="td10" id="TBL-81-12-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">A</span> </p></td>
+</tr><tr id="TBL-81-13-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-13-1" style="text-align:left;"><p class="noindent"><span class="path"><code>ca_state</code></span>
+<span class="ec-lmr-10">/
+</span><span class="path"><code>ca_cache</code></span> </p></td><td class="td11" id="TBL-81-13-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Live  score/latent  compression  state  /  completed  compressed
+  KV.</span> </p></td><td class="td10" id="TBL-81-13-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">4, A</span> </p></td>
+</tr><tr id="TBL-81-14-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-14-1" style="text-align:left;"><p class="noindent"><span class="path"><code>ica_state</code></span>
+<span class="ec-lmr-10">/
+</span><span class="path"><code>ica_cache</code></span> </p></td><td class="td11" id="TBL-81-14-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Optional live index-compression state / completed index keys.
+  The V4.1 KProject path needs no independent index state.</span> </p></td><td class="td10" id="TBL-81-14-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">A</span> </p></td>
+</tr><tr id="TBL-81-15-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-15-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Top-k
+/
+top-p</span> </p></td><td class="td11" id="TBL-81-15-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Keep  the  highest-ranked  k  entries  /  a  probability  nucleus.
+  Indexer top-k selects cache rows; sampling top-k selects possible
+  tokens.</span> </p></td><td class="td10" id="TBL-81-15-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">8, A</span> </p></td>
+</tr><tr id="TBL-81-16-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-16-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">ZOS</span> </p></td><td class="td11" id="TBL-81-16-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Zero-overhead  scheduling:  overlap  host  work  with  the  next
+  forward while correcting information that is a step behind. The
+  name does not guarantee that all host time is hidden.</span> </p></td><td class="td10" id="TBL-81-16-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">1, 6</span> </p></td>
+</tr><tr id="TBL-81-17-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-17-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">CUDA
+graph</span> </p></td><td class="td11" id="TBL-81-17-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Captured device work replayed using prepared buffers and a
+  chosen size bucket.</span> </p></td><td class="td10" id="TBL-81-17-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">6</span> </p></td>
+</tr><tr id="TBL-81-18-" style="vertical-align:baseline;"><td class="td01" id="TBL-81-18-1" style="text-align:left;"></td></tr></table></div> </div>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-84"><colgroup id="TBL-84-1g"><col id="TBL-84-1"/><col id="TBL-84-2"/><col id="TBL-84-3"/></colgroup><tr id="TBL-84-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Term</span> </p></td><td class="td11" id="TBL-84-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Meaning in this book</span> </p></td><td class="td10" id="TBL-84-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Where</span> </p></td>
+</tr><tr id="TBL-84-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">HC</span> </p></td><td class="td11" id="TBL-84-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Hyper-connections:   mix   multiple   residual   streams   around
+  sublayers. Navigation only; the book does not derive this model
+  mechanism.</span> </p></td><td class="td10" id="TBL-84-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">B</span> </p></td>
+</tr><tr id="TBL-84-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Engram</span> </p></td><td class="td11" id="TBL-84-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The n-gram embedding mechanism; </span><code>EngramRuntime </code><span class="ec-lmr-10">fetches its
+  sharded embeddings. A name, not an acronym expanded here.
+  Navigation only.</span> </p></td><td class="td10" id="TBL-84-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">B</span> </p></td>
+</tr><tr id="TBL-84-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">MoE
+/
+EP</span> </p></td><td class="td11" id="TBL-84-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Mixture of experts / expert parallelism: route token work to
+  expert weights distributed across ranks.</span> </p></td><td class="td10" id="TBL-84-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">7</span> </p></td>
+</tr><tr id="TBL-84-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">DP
+/
+CP</span> </p></td><td class="td11" id="TBL-84-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Data / context parallelism: engines handle different requests /
+  workers cooperate within an engine. These groups can reuse the
+  same ranks as EP.</span> </p></td><td class="td10" id="TBL-84-5-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">7, B</span> </p></td>
+</tr><tr id="TBL-84-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-6-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">EPLB</span> </p></td><td class="td11" id="TBL-84-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Expert parallelism load balancing: collect loads, choose replicas
+  and placement, then move weights and update mappings.</span> </p></td><td class="td10" id="TBL-84-6-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">7</span> </p></td>
+</tr><tr id="TBL-84-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-7-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">MTP
+/
+nextn</span> </p></td><td class="td11" id="TBL-84-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Multi-token   prediction   /   the   configured   draft   count.   A
+  verification budget counts query positions, not just requests.</span> </p></td><td class="td10" id="TBL-84-7-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">8</span> </p></td>
+</tr><tr id="TBL-84-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-8-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">DFlash
+/
+DSpark</span> </p></td><td class="td11" id="TBL-84-8-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The draft-model path / the reported variable-length verification
+  method.   They   are   names;   the   implementation   connects
+  proposals, confidence and budgeting.</span> </p></td><td class="td10" id="TBL-84-8-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">2, 8</span> </p></td>
+</tr><tr id="TBL-84-9-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-9-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">YOCO
+/
+CED</span> </p></td><td class="td11" id="TBL-84-9-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">You  Only  Cache  Once  /  Causal  Encoder-Decoder.  Related
+  model  designs,  not  interchangeable  names  for  every  kind  of
+  cross-layer sharing.</span> </p></td><td class="td10" id="TBL-84-9-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">9</span> </p></td>
+</tr><tr id="TBL-84-10-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-10-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Mask
+/
+compact</span> </p></td><td class="td11" id="TBL-84-10-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Two execution modes for truncated prefill: retain rows and mask
+  work / physically remove rows. Their equivalence is distinct from
+  agreement with full prefill.</span> </p></td><td class="td10" id="TBL-84-10-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">9, 10</span> </p></td>
+</tr><tr id="TBL-84-11-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-11-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Batch
+invariance</span> </p></td><td class="td11" id="TBL-84-11-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The specified values remain identical when batch composition
+  changes. State which values and comparator are tested.</span> </p></td><td class="td10" id="TBL-84-11-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">10</span> </p></td>
+</tr><tr id="TBL-84-12-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-12-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Golden
+tokens</span> </p></td><td class="td11" id="TBL-84-12-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Prescribed  token  IDs  that  hold  a  test  trajectory  fixed  while
+  probabilities or other values are compared.</span> </p></td><td class="td10" id="TBL-84-12-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">10</span> </p></td>
+</tr><tr id="TBL-84-13-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-13-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">PIT
+/
+KS</span> </p></td><td class="td11" id="TBL-84-13-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Probability integral transform / Kolmogorov–Smirnov test. The
+  sampler  check  uses  randomised  PIT  values  and  tests  their
+  distribution.</span> </p></td><td class="td10" id="TBL-84-13-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">10</span> </p></td>
+</tr><tr id="TBL-84-14-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-14-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">PE
+/
+CE</span> </p></td><td class="td11" id="TBL-84-14-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Prefill engine / decode (completion) engine; they use the released
+  </span><code>PROMPT </code><span class="ec-lmr-10">/ </span><code>COMPLETION </code><span class="ec-lmr-10">roles. Separating roles does not supply
+  production transfer and routing services.</span> </p></td><td class="td10" id="TBL-84-14-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">5, 11</span> </p></td>
+</tr><tr id="TBL-84-15-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-15-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">P/D;
+E/P/D</span> </p></td><td class="td11" id="TBL-84-15-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Prefill/decode; vision encoding/prefill/decode stage separation.</span> </p></td><td class="td10" id="TBL-84-15-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">11</span> </p></td>
+</tr><tr id="TBL-84-16-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-16-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">TTL
+/
+LRU</span> </p></td><td class="td11" id="TBL-84-16-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Time  to  live  /  least  recently  used.  Retention  time  and
+  capacity-driven   eviction   are   separate   mechanisms   in   the
+  described service.</span> </p></td><td class="td10" id="TBL-84-16-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">11</span> </p></td>
+</tr><tr id="TBL-84-17-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-17-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">3FS</span> </p></td><td class="td11" id="TBL-84-17-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepSeek’s  separately  released  distributed  file  system.  The
+  deployment account places block KV there, not SWA state.</span> </p></td><td class="td10" id="TBL-84-17-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">11</span> </p></td>
+</tr><tr id="TBL-84-18-" style="vertical-align:baseline;"><td class="td01" id="TBL-84-18-1" style="text-align:left;"></td></tr></table></div> </div>
+</article><nav class="page-turn" aria-label="Book pages"><a href="appendix-c.html"><small>PREVIOUS</small>← Source edition and excerpts</a><a class="next" href="references.html"><small>NEXT</small>References →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

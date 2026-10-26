@@ -1,0 +1,783 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A generation loop · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link active" href="chapter-01.html" aria-current="page"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 01</p><h1 class="chapterHead" id="a-generation-loop"><a id="x1-60001"></a>A generation loop</h1>
+<p class="noindent"><a id="ref-ch:loop"></a>
+</p><p class="indent">   Suppose a function takes a list of integers and returns a score for each possible next integer.
+You can use it to extend the list: call the function, choose an integer, append it and repeat. This
+is enough to describe the outer loop of text generation.
+</p><p class="indent">   Running that loop for many people raises further questions. Which work can be reused?
+Which requests should run together? When can their memory be released? Four small programs
+give us the tools to follow a real request through DeepInfer. We will trace admission, scheduling,
+execution and result ownership, then explain why an empty scheduling queue does not end all of
+the engine’s work.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-1">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">What must we add around a prediction function to serve several requests? Watch
+three things: which token the next call needs, which work survives a call, and which
+request gets the next free slot. </p>
+</div>
+</div>
+<p class="indent">   Figure <a href="chapter-01.html#ref-fig:loop">1.1</a> shows the smallest version: each prediction depends on the token just selected,
+until an end marker or output limit stops the loop.
+</p>
+<figure class="figure"><a id="ref-fig:loop"></a>
+<p class="noindent" id="-the-next-prediction-depends-on-the-selected-token-the-end-marker-or-output-limit-ends-the-loop"><a aria-label="Open figure at full size" class="figure-image" href="webbook0x.svg" rel="noopener" target="_blank"><img alt="Figure 1.1: The next prediction depends on the selected token. The end marker or output
+limit ends the loop." loading="lazy" src="webbook0x.svg"/></a>
+<a id="x1-6001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 1.1: </span><span class="content">The next prediction depends on the selected token. The end marker or output
+limit ends the loop.
+</span></figcaption>
+
+</figure>
+<h3 class="sectionHead" id="one-decision-at-a-time"><span class="titlemark">1.1   </span> <a id="x1-70001.1"></a>One decision at a time</h3>
+<p class="noindent">Language models work with <em>tokens</em>: entries in a vocabulary, each identified by an integer. A token
+may represent a word, part of a word, punctuation or a special marker. The program
+that maps text to these integers is a <em>tokenizer</em>. The exact mapping depends on the
+model.
+</p><p class="indent">   Our first experiment invents a vocabulary with five entries. Three stand for words; two mark
+the start and end. The integers and scores are chosen for this exercise.
+</p><p class="indent">   Run this command from the book directory:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/01_generate.py
+</code></pre></div>
+<p class="indent">   Before reading the output, follow the first row of <code>SCORES</code>. The starting token has ID zero. The
+largest score in row zero belongs to token one, <code>Small</code>. That token selects the next
+row.
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.1.</b> An invented vocabulary and its score table.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">8</span><span><span class="n">VOCAB</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"&lt;start&gt;"</span><span class="p">,</span> <span class="s2">"Small"</span><span class="p">,</span> <span class="s2">"steps"</span><span class="p">,</span> <span class="s2">"help"</span><span class="p">,</span> <span class="s2">"&lt;end&gt;"</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">9</span><span><span class="n">SCORES</span> <span class="o">=</span> <span class="p">[</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">10</span><span>    <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span>  <span class="c1"># &lt;start&gt; -&gt; Small</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">11</span><span>    <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span>  <span class="c1"># Small   -&gt; steps</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span>    <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span>  <span class="c1"># steps   -&gt; help</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span>    <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">9</span><span class="p">],</span>  <span class="c1"># help    -&gt; &lt;end&gt;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span>    <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">9</span><span class="p">],</span>  <span class="c1"># &lt;end&gt;   -&gt; &lt;end&gt;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span><span class="n">END</span> <span class="o">=</span> <span class="n">VOCAB</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="s2">"&lt;end&gt;"</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/01_generate.py">labs/01_generate.py</a> · lines 8–16</div></div>
+<p class="indent">   The loop uses the last token to select a row, chooses the largest score and adds
+the chosen token to the history. The complete script calls this function and checks its
+result.
+</p><p class="indent"> <a id="ref-lst:generate"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 1.2.</b> Choose one token and repeat.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">def</span> <span class="nf">generate</span><span class="p">(</span><span class="n">max_new_tokens</span><span class="o">=</span><span class="mi">8</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">history</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="n">output</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">max_new_tokens</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>        <span class="n">scores</span> <span class="o">=</span> <span class="n">SCORES</span><span class="p">[</span><span class="n">history</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>        <span class="n">token</span> <span class="o">=</span> <span class="n">scores</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="n">scores</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"step </span><span class="si">{</span><span class="n">step</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">VOCAB</span><span class="p">[</span><span class="n">history</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]]</span><span class="si">}</span><span class="s2"> -&gt; </span><span class="si">{</span><span class="n">VOCAB</span><span class="p">[</span><span class="n">token</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>        <span class="n">history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>        <span class="k">if</span> <span class="n">token</span> <span class="o">==</span> <span class="n">END</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>            <span class="nb">print</span><span class="p">(</span><span class="s2">"stop: end token"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>            <span class="k">break</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>        <span class="n">output</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">VOCAB</span><span class="p">[</span><span class="n">token</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">31</span><span>    <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">32</span><span>        <span class="nb">print</span><span class="p">(</span><span class="s2">"stop: output limit"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">33</span><span>    <span class="nb">print</span><span class="p">(</span><span class="s2">"text:"</span><span class="p">,</span> <span class="s2">" "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">output</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">34</span><span>    <span class="k">return</span> <span class="n">output</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/01_generate.py">labs/01_generate.py</a> · lines 19–34</div></div>
+<p class="indent">   Here is the output from running the script:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>step 1: &lt;start&gt; -&gt; Small
+step 2: Small -&gt; steps
+step 3: steps -&gt; help
+step 4: help -&gt; &lt;end&gt;
+stop: end token
+text: Small steps help
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/01_generate.txt">results/01_generate.txt</a></div></div>
+<p class="indent">   The table plays the role of a very small prediction function. Unlike a Transformer, it uses
+only the last token and has no learned weights. This restriction makes every decision
+visible.
+</p><p class="indent">   Choosing the largest score is called <em>greedy selection</em>. A language model usually returns scores
+called <em>logits</em>. A sampler can turn them into probabilities and draw a token, or use them
+to make a greedy choice. We will study sampling later. Here, <code>max </code>makes the choice
+deterministic.
+</p><p class="indent">   The expression <code>scores.index(max(scores)) </code>finds the first position with the largest score. If
+two tokens tie, it therefore chooses the earlier one. The <code>else </code>attached to the <code>for </code>loop runs only
+when the loop reaches its limit without executing <code>break</code>.
+</p><p class="indent">   The loop needs two ways to stop. The end marker lets the prediction function finish an
+answer. The output limit stops a function that never chooses that marker. Predict the result of
+<code>generate(max_new_tokens=2)</code>, then try it in a Python session. Does the loop reach the end
+marker?
+</p>
+<h4 class="subsectionHead" id="what-depends-on-what"><span class="titlemark">1.1.1   </span> <a id="x1-80001.1.1"></a>What depends on what</h4>
+<p class="noindent">Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mn>1</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mo>…</mo><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>x</mi></mrow><mrow><mi>n</mi></mrow></msub></mrow></math> denote the input tokens.
+A model with fixed weights <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>𝜃</mi></mrow></math>
+supplies scores: </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>z</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>f</mi></mrow><mrow><mi>𝜃</mi></mrow></msub><mo class="MathClass-open" stretchy="false">(</mo><msub><mrow><mi>x</mi></mrow><mrow><mn>1</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mo>…</mo><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>x</mi></mrow><mrow><mi>n</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The selection rule turns <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>z</mi></mrow></math>
+into <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>n</mi><mo class="MathClass-bin" stretchy="false">+</mo><mn>1</mn></mrow></msub></mrow></math>.
+The next call then uses the extended sequence. The symbol
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>f</mi></mrow><mrow><mi>𝜃</mi></mrow></msub></mrow></math> hides
+the neural network for now; the dependence between calls is what matters.
+</p><p class="indent">   In ordinary generation, the next call needs the token chosen by the previous call.
+Knowing that an answer will contain ten tokens does not tell us which ten tokens
+to feed into ten independent calls. Later, speculative decoding will give us a way to
+propose several tokens and verify them. It must still respect the model’s generation
+rule.
+</p>
+<h3 class="sectionHead" id="keep-work-that-will-be-needed-again"><span class="titlemark">1.2   </span> <a id="x1-90001.2"></a>Keep work that will be needed again</h3>
+<p class="noindent">A simple implementation could pass the entire growing history to the model on every call. For a
+causal model, earlier positions cannot depend on tokens that have not yet been generated. Some
+work on those positions can therefore be saved.
+</p><p class="indent">   To see the principle without introducing attention, use a prefix sum. Our second prediction
+function returns the sum of all input integers, modulo ten. The modulo operation keeps the
+output in the range zero to nine.
+</p><p class="indent">   Starting with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>5</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>,
+the sum is eleven, so the next integer is one. Appending one makes the sum twelve;
+the next integer is two. Appending two makes the sum fourteen; the next integer is
+four.
+</p><p class="indent">   There are two ways to do this. One sums the whole history each time. The other keeps a
+running total and adds only the newly generated integer before the next prediction.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/02_reuse.py
+</code></pre></div>
+<p class="indent">   The first function starts its sum at zero for every prediction:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.3.</b> Sum the whole history each time.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">9</span><span><span class="k">def</span> <span class="nf">recompute</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">10</span><span>    <span class="n">history</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">11</span><span>    <span class="n">output</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span>    <span class="n">additions</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span>    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span>        <span class="n">total</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>        <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">history</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>            <span class="n">total</span> <span class="o">+=</span> <span class="n">token</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>            <span class="n">additions</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>        <span class="n">token</span> <span class="o">=</span> <span class="n">total</span> <span class="o">%</span> <span class="mi">10</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>        <span class="n">history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>        <span class="n">output</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="k">return</span> <span class="n">output</span><span class="p">,</span> <span class="n">additions</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/02_reuse.py">labs/02_reuse.py</a> · lines 9–21</div></div>
+<p class="indent">   The second sums the prompt once. Before each later prediction, it adds the previous output to
+the saved total:
+</p><p class="indent"> <a id="ref-lst:reuse"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 1.4.</b> Keep the total and add only new work.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">24</span><span><span class="k">def</span> <span class="nf">reuse</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>    <span class="n">total</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>    <span class="n">additions</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>    <span class="n">processed</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">prompt</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>        <span class="n">total</span> <span class="o">+=</span> <span class="n">token</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>        <span class="n">additions</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">31</span><span>        <span class="n">processed</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">32</span><span>    <span class="n">output</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">33</span><span>    <span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">34</span><span>        <span class="k">if</span> <span class="n">step</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">35</span><span>            <span class="n">total</span> <span class="o">+=</span> <span class="n">output</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">36</span><span>            <span class="n">additions</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">37</span><span>            <span class="n">processed</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">38</span><span>        <span class="n">output</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">total</span> <span class="o">%</span> <span class="mi">10</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span>    <span class="k">return</span> <span class="n">output</span><span class="p">,</span> <span class="n">additions</span><span class="p">,</span> <span class="n">processed</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/02_reuse.py">labs/02_reuse.py</a> · lines 24–39</div></div>
+<p class="indent">   The full script calls both functions with the same prompt and checks their outputs and
+addition counts:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>prompt: [1, 2, 3, 5]
+recompute: [1, 2, 4] | additions: 15
+reuse:     [1, 2, 4] | additions: 6
+same output: True
+history entries: 7 | entries covered by final cache: 6
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/02_reuse.txt">results/02_reuse.txt</a></div></div>
+<p class="indent">   Both versions produce <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+The first performs fifteen additions: four before the first output, five before the second and six
+before the third. The second performs six: four to process the prompt, then one for each of the
+next two predictions.
+</p><p class="indent">   For a prompt of length <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>n</mi></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>m</mi> <mo class="MathClass-rel" stretchy="false">≥</mo> <mn>1</mn></mrow></math>
+output integers, the first version performs </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>n</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mi>n</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-rel" stretchy="false">⋯</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mi>n</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>m</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi mathvariant="italic">mn</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mfrac><mrow><mi>m</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>m</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mn>2</mn></mrow></mfrac>
+</mrow></math></td></tr></table></div>
+<p class="indent">   additions. The second performs <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>n</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>m</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>.
+</p><p class="indent">   The final output has been emitted but has not been fed back into the prediction function. The
+history has seven entries; the running total covers six. If we wanted another output, we would
+first add the last emitted integer. Figure <a href="chapter-01.html#ref-fig:frontier">1.2</a> separates the two boundaries. DeepInfer adds
+another: when a device result becomes available to the host. Its asynchronous scheduler must
+track these boundaries separately.
+</p>
+<figure class="figure"><a id="ref-fig:frontier"></a>
+<p class="noindent" id="-state-after-the-third-prediction-in-the-prefixsum-experiment-the-output-token-is-in-the-history-but-has-not-entered-the-saved-total"><a aria-label="Open figure at full size" class="figure-image" href="webbook1x.svg" rel="noopener" target="_blank"><img alt="Figure 1.2: State after the third prediction in the prefix-sum experiment. The output token
+4 is in the history but has not entered the saved total." loading="lazy" src="webbook1x.svg"/></a>
+<a id="x1-9001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 1.2: </span><span class="content">State after the third prediction in the prefix-sum experiment. The output token
+4 is in the history but has not entered the saved total.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="from-a-running-total-to-a-cache"><span class="titlemark">1.2.1   </span> <a id="x1-100001.2.1"></a>From a running total to a cache</h4>
+<p class="noindent">The running total is a <em>cache</em>: saved information used to avoid repeating work. It is
+useful because it contains enough information for our next update. Appending a token
+preserves that property. Editing an earlier token without repairing the total would break
+it.
+</p><p class="indent">   Transformer attention needs a richer cache. Earlier positions provide arrays called <em>keys </em>and
+<em>values</em>, which later positions use to compute their representations. Saving these arrays
+gives a key–value cache, usually shortened to <em>KV cache</em>. We will derive the arrays
+and their memory cost in later chapters. The running sum occupies constant space. A
+full-attention KV cache grows with the number of processed tokens, and each decode
+step still reads keys and values across that context. Caching avoids rebuilding them;
+it does not make attention a constant-cost operation. A sliding window bounds the
+context read by that attention layer, which changes both its memory use and what it can
+see.
+</p><p class="indent">   Processing the supplied prompt is called <em>prefill</em>. Extending the sequence using saved state is
+called <em>decode</em>. In a conventional cached generation loop, the final prompt position supplies the
+scores for the first output token. The next model call processes that token to predict the
+second.
+</p><p class="indent">   These names identify work, not a guarantee about how many device calls it takes. A
+long prompt may be split across several steps. A speculative step may verify several
+candidate tokens. Our simple loop gives us a starting point for understanding both
+changes.
+</p>
+<h3 class="sectionHead" id="rebuild-a-lost-window"><span class="titlemark">1.3   </span> <a id="x1-110001.3"></a>Rebuild a lost window</h3>
+<p class="noindent">How much history do we need to recover a cache? Change the predictor to the sum of the last
+three processed integers, modulo ten. A bounded <code>deque </code>holds that window: appending a fourth
+integer discards the oldest. This gives us the behaviour of a three-slot ring buffer without writing
+its index arithmetic.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/04_window.py
+</code></pre></div>
+<p class="indent">   Predict what happens if we lose the window after four outputs. The token history is still
+available, together with the number of entries already processed:
+</p><p class="indent"> <a id="ref-lst:window"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 1.5.</b> Generate with a bounded window, then rebuild from the processed suffix.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">11</span><span><span class="k">def</span> <span class="nf">generate</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">steps</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">3</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span>    <span class="n">history</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span>    <span class="n">window</span> <span class="o">=</span> <span class="n">deque</span><span class="p">(</span><span class="n">prompt</span><span class="p">,</span> <span class="n">maxlen</span><span class="o">=</span><span class="n">width</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span>    <span class="n">processed</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>    <span class="n">output</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">steps</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>        <span class="k">if</span> <span class="n">step</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>            <span class="n">window</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">output</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>            <span class="n">processed</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>        <span class="n">token</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">window</span><span class="p">)</span> <span class="o">%</span> <span class="mi">10</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>        <span class="k">assert</span> <span class="nb">list</span><span class="p">(</span><span class="n">window</span><span class="p">)</span> <span class="o">==</span> <span class="n">history</span><span class="p">[</span><span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">processed</span> <span class="o">-</span> <span class="n">width</span><span class="p">):</span><span class="n">processed</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>        <span class="k">assert</span> <span class="n">token</span> <span class="o">==</span> <span class="nb">sum</span><span class="p">(</span><span class="n">history</span><span class="p">[</span><span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">processed</span> <span class="o">-</span> <span class="n">width</span><span class="p">):</span><span class="n">processed</span><span class="p">])</span> <span class="o">%</span> <span class="mi">10</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>        <span class="n">history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>        <span class="n">output</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>    <span class="k">return</span> <span class="n">history</span><span class="p">,</span> <span class="n">output</span><span class="p">,</span> <span class="n">window</span><span class="p">,</span> <span class="n">processed</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span><span class="k">def</span> <span class="nf">rebuild</span><span class="p">(</span><span class="n">history</span><span class="p">,</span> <span class="n">processed</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">3</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>    <span class="k">return</span> <span class="n">deque</span><span class="p">(</span><span class="n">history</span><span class="p">[</span><span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">processed</span> <span class="o">-</span> <span class="n">width</span><span class="p">):</span><span class="n">processed</span><span class="p">],</span> <span class="n">maxlen</span><span class="o">=</span><span class="n">width</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/04_window.py">labs/04_window.py</a> · lines 11–30</div></div>
+<p class="indent">   The script clears the window, calls <code>rebuild </code>and checks it against the saved state. It also
+shows what happens if we take the wrong end of the history:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>generated: [0, 8, 3, 1]
+history entries: 8 | processed entries: 7
+window before loss: [0, 8, 3]
+rebuilt from processed suffix: [0, 8, 3]
+same window: True
+wrong suffix (includes latest output): [8, 3, 1]
+next token after processing latest output: 2
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/04_window.txt">results/04_window.txt</a></div></div>
+<p class="indent">   The four outputs are <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+At the checkpoint, seven entries have been processed, and the window is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>. The
+latest output, 1, has been emitted but not processed. Taking the last three entries of the entire
+history would include it too soon. To continue after recovery, first process that 1: the window
+becomes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>,
+whose sum predicts 2.
+</p><p class="indent">   Recovery is exact here because the state contains raw integers. The last three processed
+entries determine the whole window, regardless of the earlier history. DeepInfer’s sliding-window
+attention (SWA) bounded replay tackles a related problem, but reconstructs an approximate
+attention cache: hidden states inside the replayed suffix can depend on earlier context. Chapter 9
+will explain that approximation alongside cross-layer sharing. Assessing it requires model-quality
+checks as well as checks of buffer contents <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="give-an-empty-slot-to-another-request"><span class="titlemark">1.4   </span> <a id="x1-120001.4"></a>Give an empty slot to another request</h3>
+<p class="noindent">So far, one request has owned the loop. Now suppose three requests are waiting. For this
+experiment, A needs two output tokens, B needs four and C needs one. The engine can advance
+at most two requests in a round.
+</p><p class="indent">   We make strong assumptions to isolate one scheduling decision. All requests arrive at the
+start. Each active request gains exactly one token per round. Every round costs one
+abstract time unit, however many slots are occupied. There is no prefill cost or memory
+limit.
+</p><p class="indent">   A fixed-batch policy admits A and B together, waits until both finish, then admits C. A
+second policy refills an empty slot at the start of each round. Predict when C will finish under
+each policy.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/03_batch.py
+</code></pre></div>
+<p class="indent">   The waiting queue supplies requests in arrival order. An active slot holds a request name and
+its remaining work; <code>None </code>means the slot is empty. The <code>refill </code>switch controls admission at the
+start of each round.
+</p><p class="indent"> <a id="ref-lst:batch"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 1.6.</b> Two policies share the same execution model.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">9</span><span><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">deque</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">10</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">11</span><span><span class="n">JOBS</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">"A"</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span> <span class="p">(</span><span class="s2">"B"</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span> <span class="p">(</span><span class="s2">"C"</span><span class="p">,</span> <span class="mi">1</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span><span class="k">def</span> <span class="nf">simulate</span><span class="p">(</span><span class="n">refill</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>    <span class="n">waiting</span> <span class="o">=</span> <span class="n">deque</span><span class="p">(</span><span class="n">JOBS</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="n">active</span> <span class="o">=</span> <span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="n">finished</span> <span class="o">=</span> <span class="p">{}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>    <span class="n">rounds</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="n">unused</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="k">while</span> <span class="n">waiting</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">job</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">job</span> <span class="ow">in</span> <span class="n">active</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>        <span class="k">if</span> <span class="n">refill</span> <span class="ow">or</span> <span class="nb">all</span><span class="p">(</span><span class="n">job</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">job</span> <span class="ow">in</span> <span class="n">active</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>            <span class="k">for</span> <span class="n">slot</span><span class="p">,</span> <span class="n">job</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">active</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>                <span class="k">if</span> <span class="n">job</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">waiting</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>                    <span class="n">name</span><span class="p">,</span> <span class="n">length</span> <span class="o">=</span> <span class="n">waiting</span><span class="o">.</span><span class="n">popleft</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>                    <span class="n">active</span><span class="p">[</span><span class="n">slot</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">name</span><span class="p">,</span> <span class="n">length</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>        <span class="n">rounds</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>        <span class="n">names</span> <span class="o">=</span> <span class="p">[</span><span class="n">job</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">job</span> <span class="k">else</span> <span class="s2">"-"</span> <span class="k">for</span> <span class="n">job</span> <span class="ow">in</span> <span class="n">active</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"round </span><span class="si">{</span><span class="n">rounds</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="s1">' '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">names</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>        <span class="k">for</span> <span class="n">slot</span><span class="p">,</span> <span class="n">job</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">active</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>            <span class="k">if</span> <span class="n">job</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">31</span><span>                <span class="n">unused</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">32</span><span>                <span class="k">continue</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">33</span><span>            <span class="n">job</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">34</span><span>            <span class="k">if</span> <span class="n">job</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">35</span><span>                <span class="n">finished</span><span class="p">[</span><span class="n">job</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">=</span> <span class="n">rounds</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">36</span><span>                <span class="n">active</span><span class="p">[</span><span class="n">slot</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">37</span><span>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"rounds: </span><span class="si">{</span><span class="n">rounds</span><span class="si">}</span><span class="s2"> | unused slot-rounds: </span><span class="si">{</span><span class="n">unused</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">38</span><span>    <span class="nb">print</span><span class="p">(</span><span class="s2">"finish:"</span><span class="p">,</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">=</span><span class="si">{</span><span class="n">finished</span><span class="p">[</span><span class="n">name</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">JOBS</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span>    <span class="k">return</span> <span class="n">rounds</span><span class="p">,</span> <span class="n">unused</span><span class="p">,</span> <span class="n">finished</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/03_batch.py">labs/03_batch.py</a> · lines 9–39</div></div>
+<p class="indent">   The script calls <code>simulate </code>once with <code>refill=False </code>and once with <code>refill=True</code>, and checks
+both results:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Fixed batches
+round 1: A B
+round 2: A B
+round 3: - B
+round 4: - B
+round 5: C -
+rounds: 5 | unused slot-rounds: 3
+finish: A=2, B=4, C=5
+
+Refill after each round
+round 1: A B
+round 2: A B
+round 3: C B
+round 4: - B
+rounds: 4 | unused slot-rounds: 1
+finish: A=2, B=4, C=3
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/03_batch.txt">results/03_batch.txt</a></div></div>
+<p class="indent">   A finishes after round two under both policies. With fixed batches, its slot stays
+empty while B runs in rounds three and four. C must wait until round five. Refilling
+the empty slot lets C run in round three alongside B. Figure <a href="chapter-01.html#ref-fig:batches">1.3</a> compares the two
+schedules.
+</p>
+<figure class="figure"><a id="ref-fig:batches"></a>
+<p class="noindent" id="-the-same-seven-token-updates-occupy-five-fixedbatch-rounds-or-four-refilled-rounds-dashed-cells-are-unused-slots-rounds-have-an-assigned-unit-cost"><a aria-label="Open figure at full size" class="figure-image" href="webbook2x.svg" rel="noopener" target="_blank"><img alt="Figure 1.3: The same seven token updates occupy five fixed-batch rounds or four refilled
+rounds. Dashed cells are unused slots; rounds have an assigned unit cost." loading="lazy" src="webbook2x.svg"/></a>
+<a id="x1-12001r3"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 1.3: </span><span class="content">The same seven token updates occupy five fixed-batch rounds or four refilled
+rounds. Dashed cells are unused slots; rounds have an assigned unit cost.
+</span></figcaption>
+
+</figure>
+<p class="indent">   Both policies do seven units of useful token work. Fixed batches provide ten slot-rounds across
+five rounds and leave three unused. Refilling provides eight across four rounds and leaves one
+unused. B still finishes after round four; the shorter request benefits from the earlier
+admission.
+</p><p class="indent">   Allowing batch membership to change between generation steps is often called <em>continuous
+batching</em>. Admitting C in an engine also requires prompt processing and enough memory for its
+state.
+</p><p class="indent">   Notice that the scheduling policy never reads the remaining length when choosing the next
+request. The simulator uses that length only to decide when the simulated request finishes. A real
+engine generally discovers completion as generation proceeds.
+</p>
+<h3 class="sectionHead" id="what-an-engine-must-remember"><span class="titlemark">1.5   </span> <a id="x1-130001.5"></a>What an engine must remember</h3>
+<p class="noindent">The programs have acquired several kinds of state: token history and an output limit, reusable
+computation with a processed boundary, and a waiting queue with active slots and completion
+records.
+</p><p class="indent">   For each request, an engine needs to answer at least four questions:
+</p><ol class="enumerate1">
+<li class="enumerate" id="x1-13002x1">Which input and output tokens belong to it?
+     </li>
+<li class="enumerate" id="x1-13004x2">How much of that sequence has the model processed?
+     </li>
+<li class="enumerate" id="x1-13006x3">Which memory holds the state needed to continue?
+     </li>
+<li class="enumerate" id="x1-13008x4">Is it waiting, running or finished?</li></ol>
+<p class="indent">   The engine also needs shared decisions: which requests to advance and how much work to
+admit. A <em>scheduler </em>makes those choices. A <em>worker </em>carries out the selected model work.
+The separation lets us discuss a scheduling policy without rewriting the prediction
+function.
+</p><p class="indent">   There is a further complication when computation runs on another device. Submitting work
+may return before that work finishes. A request that has left a scheduling queue may still have a
+device operation using its memory. Resource lifetime therefore depends on completion, as well as
+logical request status. We will examine this in the chapter on overlapping host and device
+work.
+                                                                                  
+                                                                                  
+</p>
+<h3 class="sectionHead" id="follow-state-through-deepinfer"><span class="titlemark">1.6   </span> <a id="x1-140001.6"></a>Follow state through DeepInfer</h3>
+<p class="noindent"><a id="ref-sec:engine-path"></a>
+</p><p class="indent">   DeepInfer’s README says it was originally built primarily on vLLM; this book has not
+identified the fork point. Its asynchronous execution makes the loop more demanding. Its
+zero-overhead batch scheduler (ZOS) overlaps host scheduling with device computation. The
+deployment Q&amp;A credits SGLang and NanoFlow for earlier implementations of this approach
+<span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   Follow one request through the ordinary offline interface: valid text token IDs, with no
+multimodal processor or structured-output grammar. We will read its admission, execution and
+result path, then revisit what happens when execution overlaps. This is a walkthrough of the
+inspected code, not a recorded engine run. Figure <a href="chapter-01.html#ref-fig:deepinfer-path">1.4</a> gives the route. The arrows cross
+responsibility boundaries: the entry point prepares requests, the engine coordinates them, the
+scheduler selects work and the worker executes it.
+</p>
+<figure class="figure"><a id="ref-fig:deepinfer-path"></a>
+<p class="noindent" id="-the-ordinary-offline-request-path-arrows-show-data-handoffs-not-a-single-synchronous-call-stack-the-worker-calls-back-into-the-engine-to-process-completed-work-under-zos-that-work-can-belong-to-the-previous-step-the-model-cache-allocation-and-distributed-execution-remain-closed-boxes-here-deepinferentrypointdeepinferenginedeepinferschedulerdeepinferworker"><a aria-label="Open figure at full size" class="figure-image" href="webbook3x.svg" rel="noopener" target="_blank"><img alt="Figure 1.4: The ordinary offline request path. Arrows show data handoffs, not a single
+synchronous call stack. The worker calls back into the engine to process completed work;
+under ZOS, that work can belong to the previous step. The model, cache allocation and
+distributed execution remain closed boxes here [ 4 , 5 , 8 , 7 ] ." loading="lazy" src="webbook3x.svg"/></a>
+<a id="x1-14001r4"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 1.4: </span><span class="content">The ordinary offline request path. Arrows show data handoffs, not a single
+synchronous call stack. The worker calls back into the engine to process completed work;
+under ZOS, that work can belong to the previous step. The model, cache allocation and
+distributed execution remain closed boxes here <span class="cite">[<a href="references.html#Xdeepinfer-entrypoint">4</a>, <a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-scheduler">8</a>, <a href="references.html#Xdeepinfer-worker">7</a>]</span>.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="a-request-becomes-persistent-engine-state"><span class="titlemark">1.6.1   </span> <a id="x1-150001.6.1"></a>A request becomes persistent engine state</h4>
+<p class="noindent"><code>LLM.generate </code>submits each input through <code>_add_request </code>before entering its generation loop. The
+helper begins by separating the request’s sampling settings from the caller’s object, assigning an
+identifier and making a token array:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.7.</b> Prepare one request before handing it to the engine.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">151</span><span><span class="n">sampling_params</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">deepcopy</span><span class="p">(</span><span class="n">sampling_params</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">152</span><span><span class="n">request_id</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request_counter</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">153</span><span><span class="k">if</span> <span class="n">prompt_token_ids</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">154</span><span>    <span class="k">if</span> <span class="n">prompt</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">155</span><span>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"prompt and prompt_token_ids cannot both be None"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">156</span><span>    <span class="n">prompt_token_ids</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">prompt</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">157</span><span><span class="n">prompt_token_ids</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">prompt_token_ids</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L151-L157">deepinfer/entrypoints/llm.py</a> · lines 151–157</div></div>
+<p class="indent">   For our token-ID input, the tokenizer branch is skipped. <code>deepcopy </code>creates independent
+sampling settings even if the caller supplied the same object for several requests; converting to
+<code>int32 </code>establishes the array’s element type. It does not promise another copy when the input
+already has that type. These are different guarantees. The helper passes the identifier, settings
+and token array to <code>LLMEngine.add_request</code>.
+</p><p class="indent">   After validation and input preparation, the engine creates a C++-backed <code>Sequence</code>. The
+<code>sequence_args </code>dictionary carries the identifier, settings and other request metadata prepared
+earlier in that method:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.8.</b> Create the request state that survives across steps.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">594</span><span><span class="n">seq</span> <span class="o">=</span> <span class="n">Sequence</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">595</span><span>    <span class="n">prompt_token_ids</span><span class="o">=</span><span class="n">prompt_token_ids</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">596</span><span>    <span class="n">compressed_prompt_token_ids</span><span class="o">=</span><span class="n">compressed_prompt_token_ids</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">597</span><span>    <span class="o">**</span><span class="n">sequence_args</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">598</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L594-L598">deepinfer/engine/llm_engine.py</a> · lines 594–598</div></div>
+<p class="indent">   The two token arrays serve different input representations. Their model-specific contents are
+not needed to follow admission: both belong to the request whose state will survive successive
+scheduling rounds. For our request, no grammar construction is pending, so the next fragment
+takes its final <code>else</code>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.9.</b> The ordinary request reaches the scheduler immediately.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">620</span><span><span class="k">def</span> <span class="nf">_enqueue</span><span class="p">(</span><span class="n">s</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">621</span><span>    <span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">so_matcher</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">s</span><span class="o">.</span><span class="n">so_matcher</span><span class="o">.</span><span class="n">is_aborted</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">622</span><span>        <span class="n">s</span><span class="o">.</span><span class="n">status</span> <span class="o">=</span> <span class="n">SequenceStatus</span><span class="o">.</span><span class="n">FINISHED_SO_FAILED</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">623</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">add_sequence</span><span class="p">(</span><span class="n">s</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">624</span><span>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">multi_modal_processor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">625</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">multi_modal_processor</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">request_id</span><span class="p">,</span> <span class="n">multi_modal_data</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">626</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">627</span><span><span class="k">if</span> <span class="n">so_pending</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">628</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">so_matcher_builder</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">seq</span><span class="p">,</span> <span class="n">sampling_params</span><span class="o">.</span><span class="n">so_args</span><span class="p">,</span> <span class="n">_enqueue</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">629</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">630</span><span>    <span class="n">_enqueue</span><span class="p">(</span><span class="n">seq</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L620-L630">deepinfer/engine/llm_engine.py</a> · lines 620–630</div></div>
+<p class="indent">   Here <code>so_pending </code>means that a structured-output grammar still needs to be built. Our case
+also has no multimodal processor, so neither extra path runs. The call to <code>add_sequence </code>crosses
+into C++:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.10.</b> Admission appends a request; it does not run the model.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">135</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">add_sequence</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="n">Sequence</span><span class="o">&gt;</span><span class="w"> </span><span class="n">seq</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">136</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">request</span><span class="p">.</span><span class="n">arrival_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_timestamp_ms</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">137</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">engine_type</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EngineType</span><span class="o">::</span><span class="n">NORMAL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">138</span><span><span class="w">        </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">reserve_output_tokens</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">139</span><span><span class="w">        </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">_block_table_capacity</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">140</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">141</span><span><span class="w">    </span><span class="n">waiting</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">seq</span><span class="p">));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">142</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L135-L142">csrc/engine/scheduler.hpp</a> · lines 135–142</div></div>
+<p class="indent">   The scheduler records an admission timestamp and appends the sequence to <code>waiting</code>. The
+C++ <code>shared_ptr </code>is an ownership handle; <code>std::move </code>transfers that handle into the queue
+without copying the sequence’s token history. The arrow in <code>seq-&gt;request </code>accesses a member
+through that handle. For a normal offline engine, the method also reserves capacity in vectors for
+output tokens and block references. Reserving a vector’s capacity is not allocating
+the device’s KV cache. That resource decision belongs to later scheduling and cache
+management.
+</p><p class="indent">   This boundary explains why <code>generate </code>can submit many requests before running any model
+work. Admission records available work; scheduling decides what fits now. A useful consequence of
+this separation is that a new admission policy need not alter the model’s prediction function. We
+infer that benefit from the division of responsibilities, rather than from a stated design
+motive.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="generated-length-does-not-measure-completed-work"><span class="titlemark">1.6.2   </span> <a id="x1-160001.6.2"></a>Generated length does not measure completed work</h4>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.11.</b> Token history and its prompt/output boundary.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">80</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">append_token_id</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">token_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">token_ids</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">token_id</span><span class="p">);</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">81</span><span><span class="kt">int</span><span class="w"> </span><span class="nf">get_len</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="k">static_cast</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">token_ids</span><span class="p">.</span><span class="n">size</span><span class="p">());</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">82</span><span><span class="kt">int</span><span class="w"> </span><span class="nf">get_prompt_len</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">prompt_len</span><span class="p">;</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">83</span><span><span class="kt">int</span><span class="w"> </span><span class="nf">get_output_len</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">get_len</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">prompt_len</span><span class="p">;</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">84</span><span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">get_token_ids</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">token_ids</span><span class="p">;</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">85</span><span><span class="kt">int</span><span class="w"> </span><span class="n">get_last_token_id</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">token_ids</span><span class="p">.</span><span class="n">back</span><span class="p">();</span><span class="w"> </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">86</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">87</span><span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">token_ids</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">88</span><span><span class="kt">int</span><span class="w"> </span><span class="n">prompt_len</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L80-L88">csrc/engine/sequence.hpp</a> · lines 80–88</div></div>
+<p class="indent">   The persistent <code>Sequence </code>contains input tokens, generation settings, cache bookkeeping and
+scheduling state. The scheduler holds this request object across steps. These methods belong to
+its <code>SequenceData </code>token history. Output length is total history length minus prompt length. It
+counts generated tokens, not cached positions or device work that has completed. Our
+running-total experiment shows why that distinction matters <span class="cite">[<a href="references.html#Xdeepinfer-sequence">6</a>]</span>.
+</p><p class="indent">   The nearby <code>SequenceStatus </code>enum includes <code>WAITING</code>, <code>RUNNING</code>, <code>SWAPPED </code>and several reasons
+for finishing. An enum value does not tell us which transitions the scheduler actually takes. For
+this request, follow admission into <code>RUNNING </code>and eventual completion. Chapter 5 examines what
+changes when memory pressure interrupts that route <span class="cite">[<a href="references.html#Xdeepinfer-scheduler">8</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="a-scheduling-decision-becomes-model-work"><span class="titlemark">1.6.3   </span> <a id="x1-170001.6.3"></a>A scheduling decision becomes model work</h4>
+<p class="noindent">Now return to the engine’s <code>step</code>. Its call to the C++ scheduler returns per-request metadata and
+one object describing decisions for the whole batch:
+</p><p class="indent"> <a id="ref-lst:schedule"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 1.12.</b> Per-sequence metadata and batch-wide decisions.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">885</span><span><span class="n">seq_metadata_list</span><span class="p">,</span> <span class="n">scheduler_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">schedule</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">886</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">sequence_metadata_pool</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">887</span><span><span class="p">)</span>  <span class="c1"># Will also free the finished sequence groups.</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L885-L887">deepinfer/engine/llm_engine.py</a> · lines 885–887</div></div>
+<p class="indent">   Here, <em>metadata </em>means lengths, positions and references needed to interpret arrays.
+<code>SequenceMetadata </code>describes selected work for a request in this step; <code>SchedulerOutputs </code>carries
+batch decisions, including whether the work is prompt processing and which sequences were
+selected. Neither is the user’s completed answer. A correct token array with incorrect positions
+can still produce an incorrect calculation.
+                                                                                  
+                                                                                  
+</p><p class="indent">   After preparing state transfers, the engine calls <code>_execute_model_async_step</code>. Its
+implementation shows exactly what crosses the worker boundary:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.13.</b> Pass scheduling decisions to the worker and collect output addresses.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">961</span><span><span class="k">def</span> <span class="nf">_execute_model_async_step</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">962</span><span>    <span class="bp">self</span><span class="p">,</span> <span class="n">seq_metadata_list</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">SequenceMetadata</span><span class="p">],</span> <span class="n">scheduler_outputs</span><span class="p">:</span> <span class="n">SchedulerOutputs</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">963</span><span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">uint64</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">964</span><span>    <span class="k">with</span> <span class="n">cpu_timer</span><span class="o">.</span><span class="n">record</span><span class="p">(</span><span class="s2">"run_workers"</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">965</span><span>        <span class="n">request_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_run_workers</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">966</span><span>            <span class="s2">"execute_model_step"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">967</span><span>            <span class="n">driver_kwargs</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">968</span><span>                <span class="n">seq_metadata_list</span><span class="o">=</span><span class="n">seq_metadata_list</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">969</span><span>                <span class="n">scheduler_outputs</span><span class="o">=</span><span class="n">scheduler_outputs</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">970</span><span>            <span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">971</span><span>            <span class="n">is_prompt</span><span class="o">=</span><span class="n">scheduler_outputs</span><span class="o">.</span><span class="n">prompt_run</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">972</span><span>            <span class="n">is_placeholder</span><span class="o">=</span><span class="n">scheduler_outputs</span><span class="o">.</span><span class="n">is_empty</span><span class="p">(),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">973</span><span>        <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">974</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">deferred_release</span><span class="o">.</span><span class="n">collect_request_outputs</span><span class="p">(</span><span class="n">request_outputs</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">975</span><span>    <span class="k">return</span> <span class="n">request_outputs</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L961-L975">deepinfer/engine/llm_engine.py</a> · lines 961–975</div></div>
+<p class="indent"> <code>_run_workers </code>delegates to the driver worker’s dispatch method. The per-request metadata
+and scheduler result travel in <code>driver_kwargs</code>; the prompt and placeholder flags are separate
+arguments. A placeholder means no real sequences were selected, but the worker still follows an
+execution path. An empty current batch therefore does not imply that all earlier work is
+done.
+</p><p class="indent">   The returned array is registered with <code>deferred_release </code>before being returned to the caller.
+This connects the execution path to an ownership rule: these outputs are temporary, and the
+engine is already tracking their eventual release. We will inspect the copy that makes a result safe
+to keep below <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>]</span>.
+</p><p class="indent">   The comment in Listing <a href="chapter-01.html#ref-lst:schedule">1.12</a> still says “sequence groups”. vLLM v0.6.3 defines
+<code>SequenceGroup </code>in <span class="path"><code>vllm/sequence.py</code></span> and describes freeing finished sequence groups in its
+engine’s <code>step </code>docstring. In the inspected DeepInfer engine, the scheduler instead handles
+<code>Sequence </code>objects; its Python and C++ sources define no <code>SequenceGroup </code>type <span class="cite">[<a href="references.html#Xvllm-sequence">11</a>, <a href="references.html#Xvllm-engine">12</a>, <a href="references.html#Xdeepinfer-scheduler">8</a>]</span>. This is
+consistent with inherited terminology, though it does not establish the exact fork point.
+Read the types and control flow before treating an old comment as a current design
+description.
+</p>
+<h4 class="subsectionHead" id="one-call-can-handle-work-from-two-steps"><span class="titlemark">1.6.4   </span> <a id="x1-180001.6.4"></a>One call can handle work from two steps</h4>
+<p class="noindent">The opening of <code>Worker.execute_model_step</code>’s docstring gives the order:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.14.</b> A docstring excerpt showing current and previous work.</div><div class="code-tools"><span>TEXT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">96</span><span>"""The unified entry for model execution: every step (prompt/decode, ZOS on/off,</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">97</span><span>placeholder) goes through this Forward-Post_process-Sample round.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">98</span><span>  1. Forward current step (main model)</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">99</span><span>  2. Post-process previous step</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">100</span><span>  3. Sample current step</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">101</span><span>  4. Post-process current step: in place for prompt / non-ZOS steps;</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span>     ZOS decode steps defer it to the next step to overlap with forward</span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L96-L102">deepinfer/worker/worker.py</a> · lines 96–102</div></div>
+<p class="indent">   The implementation makes the delayed state explicit. After current model work, it first
+processes the state saved from the previous call:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.15.</b> Collect the previous step before deciding what to retain.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">143</span><span><span class="c1"># 2. post process prev step</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">144</span><span><span class="n">request_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_post_process_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">prev_step_state</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L143-L144">deepinfer/worker/worker.py</a> · lines 143–144</div></div>
+<p class="indent">   It then samples the current work and packages its metadata, sample output and completion
+event in <code>curr_step_state</code>. The final branch decides whether that package is processed now or
+retained:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.16.</b> Prompt work completes here; ZOS decode leaves a pending state.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">183</span><span><span class="k">if</span> <span class="n">is_prompt</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_ZERO_OVERHEAD_SCHEDULING</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">184</span><span>    <span class="n">request_outputs</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span><span class="n">request_outputs</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_post_process_step</span><span class="p">(</span><span class="n">curr_step_state</span><span class="p">)])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">185</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">prev_step_state</span> <span class="o">=</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">186</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">187</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">prev_step_state</span> <span class="o">=</span> <span class="n">curr_step_state</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">188</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">189</span><span><span class="k">return</span> <span class="n">request_outputs</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L183-L189">deepinfer/worker/worker.py</a> · lines 183–189</div></div>
+<p class="indent">   For prompt work or disabled ZOS, the returned outputs include current-step post-processing.
+For a ZOS decode step, <code>prev_step_state </code>instead becomes the current package; the returned
+outputs came from the earlier package. The method’s return is therefore not a universal “current
+prediction is ready” boundary. Chapter 6 will open the completion-event and metadata-correction
+mechanisms behind this branch.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="a-queue-can-be-empty-while-results-are-still-pending"><span class="titlemark">1.6.5   </span> <a id="x1-190001.6.5"></a>A queue can be empty while results are still pending</h4>
+<p class="noindent"><code>LLM.generate </code>adds requests through <code>_add_request </code>and enters <code>_run_engine</code>. Here is the loop
+that collects their results:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.17.</b> Step while requests remain, then flush pending results.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">175</span><span><span class="n">outputs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="n">RequestOutput</span><span class="p">]]</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="nb">list</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">176</span><span><span class="k">while</span> <span class="kc">True</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">177</span><span>    <span class="n">unfinished</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">has_unfinished_requests</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">178</span><span>    <span class="n">step_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">step</span><span class="p">()</span> <span class="k">if</span> <span class="n">unfinished</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">llm_engine</span><span class="o">.</span><span class="n">flush_inflight_reqs</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">179</span><span>    <span class="k">for</span> <span class="n">raw_output</span> <span class="ow">in</span> <span class="n">step_outputs</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">180</span><span>        <span class="c1"># clone step_outputs since step_outputs will be released in the next step</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">181</span><span>        <span class="n">output</span> <span class="o">=</span> <span class="n">RequestOutput</span><span class="o">.</span><span class="n">clone</span><span class="p">(</span><span class="n">raw_output</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">182</span><span>        <span class="n">outputs</span><span class="p">[</span><span class="n">output</span><span class="o">.</span><span class="n">request_id</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">output</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">183</span><span>        <span class="k">if</span> <span class="n">output</span><span class="o">.</span><span class="n">finished</span> <span class="ow">and</span> <span class="n">use_tqdm</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">184</span><span>            <span class="n">pbar</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">185</span><span>    <span class="k">if</span> <span class="ow">not</span> <span class="n">unfinished</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">186</span><span>        <span class="k">break</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">187</span><span><span class="n">request_ids</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">outputs</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="nb">int</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/entrypoints/llm.py#L175-L187">deepinfer/entrypoints/llm.py</a> · lines 175–187</div></div>
+<p class="indent">   The conditional call is the important part. Once the engine reports no unfinished requests, the
+loop still calls <code>flush_inflight_reqs</code>, collects its outputs and only then breaks. The docstring of
+<code>LLMEngine.flush_inflight_reqs</code>, line 978, says: “Flush and post-process all requests in flight
+under ZOS” (author’s translation). Logical completion and completion of result handling are
+separate events <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>]</span>.
+</p><p class="indent">   The engine’s flush delegates to the worker’s flush method. Its body consumes exactly the state
+retained by the branch above:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.18.</b> Drain the pending step and clear its retained state.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">281</span><span><span class="n">request_outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_post_process_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">prev_step_state</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">282</span><span><span class="bp">self</span><span class="o">.</span><span class="n">prev_step_state</span> <span class="o">=</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">283</span><span><span class="k">return</span> <span class="n">request_outputs</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/worker.py#L281-L283">deepinfer/worker/worker.py</a> · lines 281–283</div></div>
+<p class="indent"> <code>_post_process_step </code>returns an empty address array when its argument is <code>None</code>. Otherwise it
+waits for sampling completion, prepares the model results and calls the engine’s post-processing
+callback. The engine updates sequence state through <code>scheduler.process_outputs</code>, then builds
+pooled request outputs. The outer loop can thus collect the same form of result from an ordinary
+step or the final drain. Clearing <code>prev_step_state </code>prevents that retained package from being
+consumed twice <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-worker">7</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="an-output-has-an-owner-and-a-lifetime"><span class="titlemark">1.6.6   </span> <a id="x1-200001.6.6"></a>An output has an owner and a lifetime</h4>
+<p class="noindent">The comment immediately before <code>RequestOutput.clone(raw_output) </code>belongs to the call site
+above. It explains why the outer loop copies each output. The stronger ownership contract
+appears in <code>LLMEngine.step</code>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 1.19.</b> The output pool’s lifetime contract.</div><div class="code-tools"><span>TEXT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">861</span><span>"""Run one inference step and return the generated outputs.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">862</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">863</span><span>Returns:</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">864</span><span>    np.ndarray[np.uint64]: entrypoint -&gt; a list of RequestOutput objects.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">865</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">866</span><span>Note:</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">867</span><span>    The returned RequestOutput objects are managed by RequestOutputPool.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">868</span><span>    RequestOutput will be automatically released in the next step() call.</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">869</span><span>    If you need to retain them beyond the current step, you must call pool.clone(list[RequestOutput]) to obtain copies,</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">870</span><span>    and release them via pool.release(list[RequestOutput]).</span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">871</span><span>"""</span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L861-L871">deepinfer/engine/llm_engine.py</a> · lines 861–871</div></div>
+<p class="indent">   Notice the return type: <code>np.ndarray[np.uint64]</code>. Its entries are integer addresses of C++
+<code>RequestOutput </code>objects, not Python references to those objects. Keeping the array, or
+putting its integers in a Python list, preserves the addresses but does not keep the
+pointed-to objects alive. The C++ pool can destroy and reuse them at the next step
+<span class="cite">[<a href="references.html#Xdeepinfer-output-pool">9</a>]</span>.
+</p><p class="indent">   The loop therefore calls <code>RequestOutput.clone(raw_output) </code>while each address is still
+valid. This static method is declared in <span class="path"><code>deepinfer/_C/engine.pyi</code></span>, line 182. Its C++
+binding copies the object at the supplied address into a new object owned by the Python
+wrapper <span class="cite">[<a href="references.html#Xdeepinfer-output-binding">10</a>]</span>. The docstring’s reference to <code>pool.clone </code>does not match that exposed
+API: use the entry-point call and the binding to identify the operation. A Python
+reference protects the copied object; an integer address does not protect the pooled
+original.
+</p><p class="indent">   Cloning during collection preserves the result across the next pool release. Chapter 4 returns
+to the binding and pool implementation in Section <a href="chapter-04.html#ref-sec:output-storage">4.3.9</a>, alongside the ownership
+rules for cached state. Here the caller needs one rule: copy a result while its address is
+                                                                                  
+                                                                                  
+valid.
+</p>
+<h4 class="subsectionHead" id="trace-the-same-request-across-the-boundaries"><span class="titlemark">1.6.7   </span> <a id="x1-210001.6.7"></a>Trace the same request across the boundaries</h4>
+<p class="noindent">Our ordinary request now has a complete route. After admission it is a <code>Sequence </code>in <code>waiting</code>.
+When selected, its per-step metadata travels through the engine to the worker. Under ZOS
+decode, the worker retains the current step’s package and reports completed earlier work.
+Post-processing updates the request and creates output addresses; the offline collector copies
+them before the pool may reuse their storage.
+</p><p class="indent">   For a concrete branch trace, suppose this request remains active after its
+last prompt chunk and through two ZOS decode calls. Name the decode packages
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>2</mn></mrow></msub></mrow></math>.
+With no pending state on entry to that prompt call, the printed worker code gives:
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-2"><colgroup id="TBL-2-1g"><col id="TBL-2-1"/><col id="TBL-2-2"/><col id="TBL-2-3"/></colgroup><tr id="TBL-2-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-2-1-1" style="text-align:left; white-space:nowrap;">Call                                                                                                                            </td><td class="td11" id="TBL-2-1-2" style="text-align:left;"> <p class="noindent">Package
+  processed
+  for
+  output </p> </td><td class="td10" id="TBL-2-1-3" style="text-align:left;"><p class="noindent">State
+  retained
+  after
+  return </p> </td>
+</tr><tr id="TBL-2-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-2-2-1" style="text-align:left; white-space:nowrap;">Last prompt chunk                                                                                                          </td><td class="td11" id="TBL-2-2-2" style="text-align:left;"> <p class="noindent">Current
+  prompt
+  package </p> </td><td class="td10" id="TBL-2-2-3" style="text-align:left;"> <p class="noindent"><code>None</code> </p> </td>
+</tr><tr id="TBL-2-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-2-3-1" style="text-align:left; white-space:nowrap;">Decode <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math> </td><td class="td11" id="TBL-2-3-2" style="text-align:left;"> <p class="noindent">None </p> </td><td class="td10" id="TBL-2-3-3" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math> </p> </td>
+</tr><tr id="TBL-2-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-2-4-1" style="text-align:left; white-space:nowrap;">Decode <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>2</mn></mrow></msub></mrow></math> </td><td class="td11" id="TBL-2-4-2" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math> </p></td><td class="td10" id="TBL-2-4-3" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>2</mn></mrow></msub></mrow></math> </p> </td>
+</tr></table></div> </div>
+<p class="indent">   The <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math>
+call can return no output despite doing model work. The
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>2</mn></mrow></msub></mrow></math> call can
+return <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>D</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math>’s
+results while retaining its own. A later flush consumes whichever package remains. This predicts
+branch behaviour, not particular token values or the number of calls until the request
+finishes.
+</p><p class="indent">   Three different objects therefore answer three different questions: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-5"><colgroup id="TBL-5-1g"><col id="TBL-5-1"/><col id="TBL-5-2"/></colgroup><tr id="TBL-5-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-5-1-1" style="text-align:left; white-space:nowrap;">Object               </td><td class="td10" id="TBL-5-1-2" style="text-align:left;"> <p class="noindent">What it represents                                                             </p></td>
+</tr><tr id="TBL-5-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-5-2-1" style="text-align:left; white-space:nowrap;"><code>Sequence        </code></td><td class="td10" id="TBL-5-2-2" style="text-align:left;"> <p class="noindent">A request’s state across scheduling rounds.                             </p></td>
+</tr><tr id="TBL-5-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-5-3-1" style="text-align:left; white-space:nowrap;"><code>WorkerStepState </code></td><td class="td10" id="TBL-5-3-2" style="text-align:left;"> <p class="noindent">One execution step’s metadata, samples and completion event.   </p></td>
+</tr><tr id="TBL-5-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-5-4-1" style="text-align:left; white-space:nowrap;"><code>RequestOutput   </code></td><td class="td10" id="TBL-5-4-2" style="text-align:left;"> <p class="noindent">One result record, temporary in the pool or retained as a copy.  </p></td>
+</tr></table></div> </div>
+<p class="indent">   To investigate a missing final result, first compare the worker’s pending state with the outer
+loop’s flush path. To investigate results that change after a later step, inspect collection and
+                                                                                  
+                                                                                  
+cloning before changing sampling. These are different failure hypotheses because the execution
+and ownership boundaries are different. Chapters 4–6 will open the cache, scheduling and overlap
+boxes in the same map.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next"><span class="titlemark">1.7   </span> <a id="x1-220001.7"></a>Experiments to try next</h3>
+<p class="noindent">Keep the original scripts and saved outputs as a reference. Make each change in a
+scratch copy, and update its assertions when you deliberately change the expected
+result.
+</p><ol class="enumerate1">
+<li class="enumerate" id="x1-22002x1">Change a score so that the first program repeats <code>steps</code>. Does it reach the end marker,
+     or stop at the output limit?
+     </li>
+<li class="enumerate" id="x1-22004x2">Change the prefix-sum prompt and generate five integers. Check that both versions
+     agree. Predict their addition counts before running them.
+     </li>
+<li class="enumerate" id="x1-22006x3">In the window experiment, use width four and a two-integer prompt. Rebuild after
+     the first output and again after several outputs. Does each recovered window predict
+     the same next integer after processing the latest output?
+     </li>
+<li class="enumerate" id="x1-22008x4">Give A and B the same length in the batching experiment. Does refilling still reduce
+     the number of rounds?
+     </li>
+<li class="enumerate" id="x1-22010x5">Give C a later arrival time. Which part of the simulator must change? Is an empty
+     slot always evidence of a bad scheduling decision?
+     </li>
+<li class="enumerate" id="x1-22012x6">Follow the printed worker branch with ZOS disabled, then enabled for decode. Which
+     step’s outputs can the caller receive? Explain what final flush consumes in each case.
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-22014x7">Suppose the entry point keeps raw output addresses instead of cloning. Locate the
+     operation that invalidates that choice. Why does keeping the addresses in a Python
+     list not fix it?</li></ol>
+</article><nav class="page-turn" aria-label="Book pages"><a href="index.html"><small>PREVIOUS</small>← Preface</a><a class="next" href="chapter-02.html"><small>NEXT</small>Where the time goes →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#one-decision-at-a-time">1.1 One decision at a time</a><a class="toc-sub" href="#what-depends-on-what">1.1.1 What depends on what</a><a class="" href="#keep-work-that-will-be-needed-again">1.2 Keep work that will be needed again</a><a class="toc-sub" href="#from-a-running-total-to-a-cache">1.2.1 From a running total to a cache</a><a class="" href="#rebuild-a-lost-window">1.3 Rebuild a lost window</a><a class="" href="#give-an-empty-slot-to-another-request">1.4 Give an empty slot to another request</a><a class="" href="#what-an-engine-must-remember">1.5 What an engine must remember</a><a class="" href="#follow-state-through-deepinfer">1.6 Follow state through DeepInfer</a><a class="toc-sub" href="#a-request-becomes-persistent-engine-state">1.6.1 A request becomes persistent engine state</a><a class="toc-sub" href="#generated-length-does-not-measure-completed-work">1.6.2 Generated length does not measure completed work</a><a class="toc-sub" href="#a-scheduling-decision-becomes-model-work">1.6.3 A scheduling decision becomes model work</a><a class="toc-sub" href="#one-call-can-handle-work-from-two-steps">1.6.4 One call can handle work from two steps</a><a class="toc-sub" href="#a-queue-can-be-empty-while-results-are-still-pending">1.6.5 A queue can be empty while results are still pending</a><a class="toc-sub" href="#an-output-has-an-owner-and-a-lifetime">1.6.6 An output has an owner and a lifetime</a><a class="toc-sub" href="#trace-the-same-request-across-the-boundaries">1.6.7 Trace the same request across the boundaries</a><a class="" href="#experiments-to-try-next">1.7 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

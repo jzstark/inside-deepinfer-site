@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Choose the next batch · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link active" href="chapter-05.html" aria-current="page"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 05</p><h1 class="chapterHead" id="choose-the-next-batch"><a id="x1-700005"></a>Choose the next batch</h1>
+<p class="noindent"><a id="ref-ch:scheduling"></a>
+</p><p class="indent">   A free block answers whether a request can own more memory. It does not answer whether
+that request should run next. One user has submitted a long document; another wants a short
+answer; a third is already receiving tokens. They compete for computation as well as
+storage.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-7">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">If we split a long prompt into smaller pieces, will short requests get their first token
+sooner? What should happen when the next step needs memory that another request
+owns? </p>
+</div>
+</div>
+<h3 class="sectionHead" id="a-smaller-chunk-is-an-opportunity-to-choose"><span class="titlemark">5.1   </span> <a id="x1-710005.1"></a>A smaller chunk is an opportunity to choose</h3>
+<p class="noindent">Chapter 1’s batching experiment gave each active request one token per round. Now give the
+scheduler prompt work and arrivals. Request A arrives at time 0 with 12 prompt positions. B and C
+arrive at time 3 with two each. A step processes one request’s prompt, or part of it. Give a step with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math> positions the
+assigned duration <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>q</mi></mrow></math>:
+one unit of overhead plus one per position. The first output arrives when the prompt finishes.
+This experiment isolates prefill; it does not schedule subsequent decode tokens.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/11_chunks.py
+</code></pre></div>
+<p class="indent">   Compare three rules. First, finish each prompt in arrival order, also called <em>first in,
+first out </em>(FIFO). Second, allow at most four positions per step but put an unfinished
+request back at the front. Third, use the same four-position limit and put it at the back,
+behind arrivals seen during that step. Predict which rule helps B before reading the
+output.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Whole prompts, FIFO (budget 12)
+   0-&gt;13: A q=12 waiting=['B', 'C']
+  13-&gt;16: B q= 2 waiting=['C']
+  16-&gt;19: C q= 2 waiting=[]
+  first-token delays: A=13, B=13, C=16
+  work=16 positions; steps=3; finish=19
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/11_chunks.txt">results/11_chunks.txt</a></div></div>
+<p class="indent">   With whole prompts, A occupies time 0–13. B finishes at 16, so its first-token delay is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>16</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>3</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>13</mn></mrow></math>. Now
+cut A into chunks, keeping its continuation at the front:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Chunks, continuation at front (budget 4)
+   0-&gt; 5: A q= 4 waiting=['A', 'B', 'C']
+   5-&gt;10: A q= 4 waiting=['A', 'B', 'C']
+  10-&gt;15: A q= 4 waiting=['B', 'C']
+  15-&gt;18: B q= 2 waiting=['C']
+  18-&gt;21: C q= 2 waiting=[]
+  first-token delays: A=15, B=15, C=18
+  work=16 positions; steps=5; finish=21
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/11_chunks.txt">results/11_chunks.txt</a></div></div>
+<p class="indent">   The chunks create boundaries at 5 and 10, but the scheduler chooses A again at both. B’s
+delay rises to 15 because A now pays the overhead three times. Moving the continuation to the
+back changes who runs at those boundaries:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Chunks, continuation at back (budget 4)
+   0-&gt; 5: A q= 4 waiting=['B', 'C', 'A']
+   5-&gt; 8: B q= 2 waiting=['C', 'A']
+   8-&gt;11: C q= 2 waiting=['A']
+  11-&gt;16: A q= 4 waiting=['A']
+  16-&gt;21: A q= 4 waiting=[]
+  first-token delays: A=21, B=5, C=8
+  work=16 positions; steps=5; finish=21
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/11_chunks.txt">results/11_chunks.txt</a></div></div>
+<p class="indent">   The third rule uses those boundaries to change requests. At time 5 the queue is B, C, A. B
+finishes at 8, five units after its arrival. C finishes at 11, eight units after its arrival. A pays for
+their earlier answers: its own first token moves from time 13 to 21. The queue operation
+responsible for the difference is small:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.1.</b> Choose where an unfinished prompt returns.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">38</span><span>        <span class="n">admit</span><span class="p">()</span>  <span class="c1"># Arrivals during this chunk precede a rotated continuation.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span>        <span class="k">if</span> <span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span>            <span class="k">if</span> <span class="n">rotate</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span>                <span class="n">waiting</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span>            <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span>                <span class="n">waiting</span><span class="o">.</span><span class="n">appendleft</span><span class="p">(</span><span class="n">name</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span>        <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>            <span class="n">first</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">now</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/11_chunks.py">labs/11_chunks.py</a> · lines 38–45</div></div>
+<p class="indent">   All three runs process 16 positions. The chunked runs take five steps instead of three, so their
+total duration is 21 rather than 19. Smaller chunks have changed latency and overhead without
+reducing the useful work. Chapter 2’s distinction between work and elapsed time applies here too.
+Figure <a href="chapter-05.html#ref-fig:prompt-chunks">5.1</a> draws the three runs.
+</p>
+<figure class="figure"><a id="ref-fig:prompt-chunks"></a>
+<p class="noindent" id="-the-three-runs-of-labschunkspy-widths-show-assigned-time-including-one-overhead-unit-per-step-only-the-bottom-policy-uses-a-chunk-boundary-to-let-b-and-c-overtake-a"><a aria-label="Open figure at full size" class="figure-image" href="webbook14x.svg" rel="noopener" target="_blank"><img alt="Figure 5.1: The three runs of labs/11_chunks.py . Widths show assigned time, including
+one overhead unit per step. Only the bottom policy uses a chunk boundary to let B and C
+overtake A." loading="lazy" src="webbook14x.svg"/></a>
+<a id="x1-71001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 5.1: </span><span class="content">The three runs of <code>labs/11_chunks.py</code>. Widths show assigned time, including
+one overhead unit per step. Only the bottom policy uses a chunk boundary to let B and C
+overtake A.
+</span></figcaption>
+
+</figure>
+<p class="indent">   Chunk size and queue order are separate decisions. A short step creates a point at which other
+work <em>could </em>run. Whether it does depends on what the scheduler chooses there. The rotation rule
+is a teaching alternative; we will now inspect where DeepInfer actually puts an unfinished
+prompt.
+</p>
+<h3 class="sectionHead" id="follow-a-prompt-through-the-scheduler"><span class="titlemark">5.2   </span> <a id="x1-720005.2"></a>Follow a prompt through the scheduler</h3>
+<p class="noindent">In chapter 1, <code>LLMEngine.step </code>called the C++ scheduler and passed its metadata to
+the worker. Open that scheduler box. It makes three decisions in sequence: choose
+a kind of step, choose requests that fit, then describe the positions that the worker
+will evaluate. The block and state managers from chapter 4 participate in the second
+decision.
+</p><p class="indent">   The queue names have a useful historical comparison. vLLM v0.6.3 keeps <code>waiting</code>, <code>running</code>
+and <code>swapped </code>queues of sequence groups (<span class="path"><code>vllm/core/scheduler.py</code></span>, lines 340–348). Its
+preemption path can either discard cached progress for recomputation or swap blocks out for later
+recovery <span class="cite">[<a href="references.html#Xvllm-scheduler">13</a>]</span>. DeepInfer’s C++ scheduler keeps <code>waiting</code>, <code>running </code>and <code>prompted</code>. In
+this version, only <code>fork_seq </code>adds requests to <code>prompted </code>(<span class="path"><code>scheduler.hpp</code></span>, line 1118);
+lines 581–618 handle their admission to decode. Although the <code>SWAPPED </code>status name
+remains, this scheduler has no corresponding swapped queue or swap branch in <code>_preempt
+</code><span class="cite">[<a href="references.html#Xdeepinfer-scheduler-policy">37</a>, <a href="references.html#Xdeepinfer-sequence">6</a>]</span>.
+</p><p class="indent">   We use that fixed vLLM release as a comparison, not an identified fork point. The familiar
+waiting/running distinction is only the starting point. Follow DeepInfer’s rank-wide step-type
+votes and its separate in-flight counts below: they determine what a request may do before
+the preceding device result is known. Figure <a href="chapter-05.html#ref-fig:scheduler-path">5.2</a> places these decisions on the request
+path.
+</p>
+<figure class="figure"><a id="ref-fig:scheduler-path"></a>
+<p class="noindent" id="-open-the-scheduler-box-from-chapter-admission-and-preemption-use-chapter-s-ownership-state-input-preparation-turns-the-selected-lengths-into-chapter-s-addresses-output-processing-later-commits-progress-or-requeues-work"><a aria-label="Open figure at full size" class="figure-image" href="webbook15x.svg" rel="noopener" target="_blank"><img alt="Figure 5.2: Open the scheduler box from chapter 1. Admission and preemption use chapter
+4’s ownership state; input preparation turns the selected lengths into chapter 3’s addresses.
+Output processing later commits progress or requeues work." loading="lazy" src="webbook15x.svg"/></a>
+<a id="x1-72001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 5.2: </span><span class="content">Open the scheduler box from chapter 1. Admission and preemption use chapter
+4’s ownership state; input preparation turns the selected lengths into chapter 3’s addresses.
+Output processing later commits progress or requeues work.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="choose-prefill-or-decode"><span class="titlemark">5.2.1   </span> <a id="x1-730005.2.1"></a>Choose prefill or decode</h4>
+<p class="noindent">DeepInfer’s released scheduler distinguishes three engine types. A <code>PROMPT </code>engine runs the
+prefill path; a <code>COMPLETION </code>engine runs the decode path. A <code>NORMAL </code>engine can do either
+(<span class="path"><code>scheduler.hpp</code></span>, lines 288–295). A normal engine chooses one kind for each step. It
+does not build a batch mixing prompt chunks and decode rows in these two paths
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p><p class="indent">   That choice also involves other participants. A <em>data-parallel rank </em>is one participant with its
+own request batch in a cooperating group. The ranks must agree on the kind of step. Detailed
+distribution belongs to chapter 7; here the consequence is that a non-empty local queue cannot
+decide alone.
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.2.</b> Some decode counts permit a prefill attempt.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">308</span><span><span class="kt">bool</span><span class="w"> </span><span class="n">is_any_point</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">decode_step</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">decode_step</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">prefill_any_attempt_interval</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">309</span><span><span class="kt">bool</span><span class="w"> </span><span class="n">is_all_point</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">decode_step</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">prefill_attempt_interval</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">310</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">is_any_point</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">is_all_point</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">311</span><span><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">_schedule_decode</span><span class="p">(</span><span class="n">acquire</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">312</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">313</span><span><span class="kt">bool</span><span class="w"> </span><span class="n">want</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">get_gpu_cache_usage</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">GPU_CACHE_PREFILL_WATERMARK</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">_has_prefill_waiting</span><span class="p">();</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L308-L313">csrc/engine/scheduler.hpp</a> · lines 308–313</div></div>
+<p class="indent">   At an ALL attempt, every rank must want prefill; at an ANY attempt, one is enough. Lines
+315–319 implement the votes. A rank wants prefill only if its cache usage is at or below the
+watermark and the head of its waiting queue is schedulable. The default intervals are 70 and 100
+decode steps respectively, from <span class="path"><code>environ.py</code></span>, lines 174–178. An ANY point takes precedence when
+the two coincide. A prefill step resets <code>decode_step </code>to zero, which is another ALL attempt point
+<span class="cite">[<a href="references.html#Xdeepinfer-environ">30</a>, <a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p><p class="indent">   Agreement to try is not admission. After trying, the ranks vote again to check
+whether any produced a prefill result. If all attempts returned no work, they fall back to
+decode (lines 328–340). The source comment explains why: an empty prompt step would
+reset the counter, invite another unsuccessful attempt and prevent running requests
+from making progress. The ANY interval therefore offers an opportunity for isolated
+prefill work; it is not a wall-clock latency guarantee or a promise that memory will be
+available.
+</p>
+<h4 class="subsectionHead" id="the-head-of-the-queue-must-fit"><span class="titlemark">5.2.2   </span> <a id="x1-740005.2.2"></a>The head of the queue must fit</h4>
+<p class="noindent"><code>_schedule_prefill </code>examines <code>waiting.front()</code>. For a fresh request, it checks the prompt length
+and asks whether both pools can provide the storage required by <code>get_num_blocks</code>. Chapter 4
+established that this reserves blocks for the whole prompt, even when computation will be
+chunked.
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.3.</b> Wait for a possible allocation; reject an impossible one.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">386</span><span><span class="k">auto</span><span class="w"> </span><span class="n">can_allocate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_can_allocate_with_state</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">get_num_blocks</span><span class="p">());</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">387</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">can_allocate</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AllocStatus</span><span class="o">::</span><span class="n">LATER</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">388</span><span><span class="w">    </span><span class="k">break</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">389</span><span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">can_allocate</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">AllocStatus</span><span class="o">::</span><span class="n">NEVER</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">390</span><span><span class="w">    </span><span class="n">LOG_WARN</span><span class="p">(</span><span class="s">"Input prompt ({} tokens) is too long and "</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">391</span><span><span class="w">             </span><span class="s">"exceeds the capacity of block_manager"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">392</span><span><span class="w">        </span><span class="n">num_prompt_tokens</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">393</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">FINISHED_IGNORED</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">394</span><span><span class="w">    </span><span class="n">ignored_seqs</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">395</span><span><span class="w">    </span><span class="n">waiting</span><span class="p">.</span><span class="n">pop_front</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">396</span><span><span class="w">    </span><span class="k">continue</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">397</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L386-L397">csrc/engine/scheduler.hpp</a> · lines 386–397</div></div>
+<p class="indent">   The difference between <code>break </code>and <code>continue </code>is a scheduling policy. <code>LATER </code>leaves the
+request at the head and stops this pass. A smaller request behind it is not tried. This is
+<em>head-of-line blocking</em>: work that could fit waits behind work that cannot yet fit. <code>NEVER </code>marks
+the request ignored, removes it and tries the next one. It cannot become runnable by
+waiting.
+</p><p class="indent">   For example, suppose three blocks are free. The head needs four and the next request needs
+one. If the pool can eventually provide four, the head receives <code>LATER </code>and neither request is
+admitted in this pass. Choosing to skip the head would use the free memory now, but
+repeated skips could keep a large request waiting indefinitely. The released path chooses to
+stop; the code establishes that choice without establishing which policy is best for a
+service.
+                                                                                  
+                                                                                  
+</p><p class="indent">   Two other limits follow (lines 440–449). The scheduler limits the number of requests alongside
+those already running, and subtracts each selected request’s <em>whole history length </em>from
+<code>prefill_sum_seqlen_k_remain</code>. Despite the name, this second check does not charge only the
+current chunk’s key length. It is separate from the query-position budget below. A request can
+pass the storage check and still fail one of these limits.
+</p>
+<h4 class="subsectionHead" id="choose-how-many-positions-to-evaluate"><span class="titlemark">5.2.3   </span> <a id="x1-750005.2.3"></a>Choose how many positions to evaluate</h4>
+<p class="noindent">Chunking is off by default: <code>EngineArgs.chunked_prefill </code>is <code>False </code>in <span class="path"><code>deepinfer/engine/arg_utils.py</code></span>,
+line 42. The shared example setup enables it in <span class="path"><code>examples/_config.py</code></span>, line 120, unless the
+caller overrides that setting. The chunked paths below assume it has been enabled
+<span class="cite">[<a href="references.html#Xdeepinfer-engine-args">39</a>, <a href="references.html#Xdeepinfer-config">17</a>]</span>.
+</p><p class="indent">   The unsatisfied prompt work is <code>get_len() - cache.num_tokens</code>. The scheduler first caps
+that work by the remaining query budget:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.4.</b> Fit a prompt chunk into the remaining position budget.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">470</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">seq_workload</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">max_num_batched_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">num_batched_tokens</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">cp_align</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cp_align</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">471</span><span><span class="w">    </span><span class="n">new_workload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">seq_workload</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">max_num_batched_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">num_batched_tokens</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">cp_align</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cp_align</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">472</span><span><span class="w">    </span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">new_workload</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">473</span><span><span class="w">    </span><span class="n">TORCH_CHECK</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">474</span><span><span class="w">        </span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">seq_workload</span><span class="p">,</span><span class="w"> </span><span class="s">"_schedule: is_chunked must be true:, seqlen_q:"</span><span class="p">,</span><span class="w"> </span><span class="n">seqlen_q</span><span class="p">,</span><span class="w"> </span><span class="s">" seq_workload: "</span><span class="p">,</span><span class="w"> </span><span class="n">seq_workload</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">475</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L470-L475">csrc/engine/scheduler.hpp</a> · lines 470–475</div></div>
+<p class="indent">   Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>T</mi></mrow></math> be <code>max_num_batched_tokens</code>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>U</mi></mrow></math> the positions already
+charged to this batch and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>
+the alignment. The available allowance here is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>a</mi> <mrow><mo fence="true" form="prefix"> ⌊</mo><mrow><mfrac><mrow><mi>T</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>U</mi></mrow>
+<mrow><mi>a</mi></mrow></mfrac> </mrow><mo fence="true" form="postfix">⌋</mo></mrow><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   For example, with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>T</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>259</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>U</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>252</mn></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>, only
+four of the seven remaining positions are available to the next chunk. The constructor sets
+<code>cp_align </code>to 1 for one context-parallel participant, or twice the group size otherwise
+(line 90). Context parallelism divides context computation across devices; Appendix <a href="appendix-b.html#ref-app:map">B</a>
+shows how its ranks are grouped and how each sequence is split between them. For
+this chapter, alignment means that useful positions and charged positions need not
+match.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The cap is not the final chunk size. Lines 477–510 respect explicit checkpoints, move
+boundaries away from the inside of an image, check whether chunking is enabled and enforce a
+minimum chunk length. Once the chunk passes those checks, the scheduler commits the
+decision:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.5.</b> Charge padded positions and allocate before dispatch.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">515</span><span><span class="n">num_batched_tokens</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">cp_align</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">cp_align</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">cp_align</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">516</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">517</span><span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">WAITING</span><span class="p">,</span><span class="w"> </span><span class="s">"status "</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="p">));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">518</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">cache</span><span class="p">.</span><span class="n">block_table</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">519</span><span><span class="w">    </span><span class="n">acquire</span><span class="p">.</span><span class="n">allocate_seq</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">520</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">521</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">522</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">is_chunked</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">523</span><span><span class="w">    </span><span class="n">num_curr_seqs</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">524</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">RUNNING</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">525</span><span><span class="w">    </span><span class="n">allocate_mtp_info_slot</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">526</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L515-L526">csrc/engine/scheduler.hpp</a> · lines 515–526</div></div>
+<p class="indent">   The first line charges <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi><mo class="MathClass-open" stretchy="false">⌈</mo><mi>q</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>a</mi><mo class="MathClass-close" stretchy="false">⌉</mo></mrow></math>
+positions for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math>
+useful queries. Five queries at alignment four cost eight budget positions. This is an accounting
+rule, not a claim that every padded position produces an output token.
+</p><p class="indent">   The fresh request now owns blocks and a state slot. It enters the selected list and
+leaves <code>waiting</code>. If this is only a partial prompt, its status stays <code>WAITING</code>; if it is the
+final chunk, its status becomes <code>RUNNING</code>. Status is not queue membership: a partially
+processed request can temporarily be outside the waiting queue while its chunk is in
+flight.
+</p><p class="indent">   When <code>process_outputs </code>handles an unfinished chunk, it puts the request back at the
+<em>front</em>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.6.</b> An unfinished prompt returns ahead of waiting arrivals.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">1016</span><span><span class="n">TORCH_CHECK</span><span class="p">(</span><span class="n">seq_ptr</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">WAITING</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1017</span><span><span class="w">    </span><span class="n">SPRINT_VARS</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1018</span><span><span class="w">        </span><span class="s">"In process_outputs, should be waiting"</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">cache</span><span class="p">.</span><span class="n">num_tokens</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">input</span><span class="p">.</span><span class="n">tokens</span><span class="p">.</span><span class="n">get_len</span><span class="p">(),</span><span class="w"> </span><span class="n">seq</span><span class="p">.</span><span class="n">get_nextn_len</span><span class="p">()));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1019</span><span><span class="n">waiting</span><span class="p">.</span><span class="n">push_front</span><span class="p">(</span><span class="n">seq_ptr</span><span class="p">);</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L1016-L1019">csrc/engine/scheduler.hpp</a> · lines 1016–1019</div></div>
+<p class="indent">   That is the front-return rule from the experiment, not its rotation rule. Real execution adds
+overlap, group agreement and the possibility of selecting several prompts in one step, with a limit:
+a <code>NORMAL </code>engine stops selecting requests as soon as it selects an unfinished chunk (lines 543–545).
+That chunk is therefore the last request selected in the step. Returned to the front after
+processing, it again precedes later arrivals. The experiment’s times do not describe this engine,
+but these two queue operations explain why chunking alone does not let a later short prompt
+overtake a long one.
+</p>
+<h4 class="subsectionHead" id="prefill-can-keep-decode-waiting"><span class="titlemark">5.2.4   </span> <a id="x1-760005.2.4"></a>Prefill can keep decode waiting</h4>
+<p class="noindent">Combine that return to the front with the step-type rule. The worker processes a prompt step’s
+outputs before returning, even with ZOS enabled (<span class="path"><code>worker.py</code></span>, lines 101–102 and 182–187). An
+unfinished A is therefore back at the head before the next scheduling call. Since prefill reset
+<code>decode_step </code>to zero, that call is another ALL attempt. With one rank, prefill can continue
+while the head remains schedulable, cache usage is at most the 0.9 watermark and
+the admission checks succeed. There need not be a decode step between A’s chunks
+<span class="cite">[<a href="references.html#Xdeepinfer-worker">7</a>, <a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p><p class="indent">   With several ranks, consecutive ALL attempts require every rank to want prefill.
+At an ANY attempt, however, some ranks may have no local work. At either kind of
+attempt, a rank that wanted prefill may still admit nothing, for example because its
+head request needs blocks that are not free. If another rank has scheduled prefill, such
+ranks execute an empty prompt step (<span class="path"><code>scheduler.hpp</code></span>, lines 332–340); their running
+decode requests do not advance either. During these prompt steps the engine schedules
+no new decode work. It may still deliver results from an earlier decode step, which
+the worker post-processes before sampling the current step. Once those results are
+drained, waiting for the next decode step can lengthen chapter 2’s inter-token intervals.
+This consequence follows from the inspected control flow; it is not a measured engine
+result.
+</p><p class="indent">   The scope matters. <code>NORMAL </code>serves offline or combined prefill/decode execution. The
+                                                                                  
+                                                                                  
+production Q&amp;A describes separate prefill and decode instances, the separate roles represented by
+<code>PROMPT </code>and <code>COMPLETION </code>in the released scheduler. The repeated choice between prefill and decode
+described here belongs to the normal engine, not that separated production architecture
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>, <a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="a-chunk-becomes-positions-and-addresses"><span class="titlemark">5.2.5   </span> <a id="x1-770005.2.5"></a>A chunk becomes positions and addresses</h4>
+<p class="noindent">Trace a text-only request with 300 prompt tokens. Use a normal engine with chunking enabled, a
+query budget of 128, alignment one, no prefix hit and no draft positions. Assume all other limits
+permit admission, enough memory is free and each previous chunk has been processed before the
+next is scheduled.
+</p><p class="indent">   At its first admission, <code>get_num_blocks </code>asks for
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mn>300</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>128</mn><mo class="MathClass-close" stretchy="false">⌉</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math> blocks.
+The allocator also gives it a state slot. All three chunks keep those allocations:
+</p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular wide-table" id="TBL-7"><colgroup id="TBL-7-1g"><col id="TBL-7-1"/><col id="TBL-7-2"/><col id="TBL-7-3"/><col id="TBL-7-4"/><col id="TBL-7-5"/></colgroup><tr id="TBL-7-1-" style="vertical-align:baseline;"><td class="td11" id="TBL-7-1-1" style="text-align:right; white-space:nowrap;"> Chunk  </td><td class="td11" id="TBL-7-1-2" style="text-align:right; white-space:nowrap;"> Cached before  </td><td class="td11" id="TBL-7-1-3" style="text-align:right; white-space:nowrap;"> Query length  </td><td class="td11" id="TBL-7-1-4" style="text-align:right; white-space:nowrap;"> Key length  </td><td class="td11" id="TBL-7-1-5" style="text-align:left; white-space:nowrap;"> Query positions  </td>
+</tr><tr id="TBL-7-2-" style="vertical-align:baseline;"><td class="td11" id="TBL-7-2-1" style="text-align:right; white-space:nowrap;">      1  </td><td class="td11" id="TBL-7-2-2" style="text-align:right; white-space:nowrap;">            0  </td><td class="td11" id="TBL-7-2-3" style="text-align:right; white-space:nowrap;">         128  </td><td class="td11" id="TBL-7-2-4" style="text-align:right; white-space:nowrap;">       128  </td><td class="td11" id="TBL-7-2-5" style="text-align:left; white-space:nowrap;"> 0–127               </td>
+</tr><tr id="TBL-7-3-" style="vertical-align:baseline;"><td class="td11" id="TBL-7-3-1" style="text-align:right; white-space:nowrap;">      2  </td><td class="td11" id="TBL-7-3-2" style="text-align:right; white-space:nowrap;">          128  </td><td class="td11" id="TBL-7-3-3" style="text-align:right; white-space:nowrap;">         128  </td><td class="td11" id="TBL-7-3-4" style="text-align:right; white-space:nowrap;">       256  </td><td class="td11" id="TBL-7-3-5" style="text-align:left; white-space:nowrap;"> 128–255            </td>
+</tr><tr id="TBL-7-4-" style="vertical-align:baseline;"><td class="td11" id="TBL-7-4-1" style="text-align:right; white-space:nowrap;">      3  </td><td class="td11" id="TBL-7-4-2" style="text-align:right; white-space:nowrap;">          256  </td><td class="td11" id="TBL-7-4-3" style="text-align:right; white-space:nowrap;">          44  </td><td class="td11" id="TBL-7-4-4" style="text-align:right; white-space:nowrap;">       300  </td><td class="td11" id="TBL-7-4-5" style="text-align:left; white-space:nowrap;"> 256–299            </td>
+</tr></table></div> </div></div>
+<p class="indent"> <code>Scheduler::schedule </code>builds a metadata record for each selected request. Its key length is
+the processed count plus in-flight positions plus this step’s query length (lines 696–707). Our
+trace has no in-flight positions from another step. The <code>SequenceMetadata </code>constructor
+takes the block-table reference and state ID from the sequence (<span class="path"><code>sequence.hpp</code></span>, lines
+374–381).
+                                                                                  
+                                                                                  
+</p><p class="indent">   One downstream consumer makes the connection to chapter 3 explicit. The prefill input
+builder converts those lengths and that state ID into SWA write addresses:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.7.</b> Turn a scheduled prompt chunk into ring destinations.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">98</span><span><span class="k">auto</span><span class="w"> </span><span class="n">slot_mapping_store_swa</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_or_create_tensor</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">has_out</span><span class="p">,</span><span class="w"> </span><span class="s">"slot_mapping_store_swa"</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">total_q</span><span class="p">},</span><span class="w"> </span><span class="n">torch</span><span class="o">::</span><span class="n">kInt32</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">99</span><span><span class="k">auto</span><span class="w"> </span><span class="n">p_slot_mapping_store_swa</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">slot_mapping_store_swa</span><span class="p">.</span><span class="n">mutable_data_ptr</span><span class="o">&lt;</span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">100</span><span><span class="kt">int32_t</span><span class="w"> </span><span class="n">i_q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">101</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">p_seq</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">seq_metadata_list</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int32_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">,</span><span class="w"> </span><span class="o">++</span><span class="n">i_q</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">103</span><span><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">swa_block_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">104</span><span><span class="w">            </span><span class="n">p_slot_mapping_store_swa</span><span class="p">[</span><span class="n">i_q</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">state_id</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">swa_block_size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_k</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">j</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">swa_block_size</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">105</span><span><span class="w">        </span><span class="k">else</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">106</span><span><span class="w">            </span><span class="n">p_slot_mapping_store_swa</span><span class="p">[</span><span class="n">i_q</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">107</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">108</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">109</span><span><span class="n">TORCH_CHECK_EQ</span><span class="p">(</span><span class="n">i_q</span><span class="p">,</span><span class="w"> </span><span class="n">total_q</span><span class="p">);</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L98-L109">csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</a> · lines 98–109</div></div>
+<p class="indent">   Within a chunk, query <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>j</mi></mrow></math>
+is at logical position <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">seqlen_k</mtext></mstyle><mo class="MathClass-bin" stretchy="false">−</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">seqlen_q</mtext></mstyle> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>j</mi></mrow></math>.
+For the second chunk, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>j</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0</mn></mrow></math>
+gives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>128</mn></mrow></math>.
+In state slot 2 with the default ring length 134, its destination is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>134</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>128</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>396</mn></mrow></math>; query
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>j</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>6</mn></mrow></math> wraps
+to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>134</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>268</mn></mrow></math>.
+All our chunks fit within the ring. For a chunk longer than the ring, the
+condition keeps only its last ring-length positions; earlier destinations receive
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>.
+Chapter 3 explained why prompt attention has a temporary input and reads the old cache before
+writing these final rows <span class="cite">[<a href="references.html#Xdeepinfer-prefill-input">38</a>]</span>.
+</p><p class="indent">   The scheduler has therefore chosen more than request names. It has chosen a range of logical
+positions, a budget charge and the storage through which the worker will address those
+positions.
+</p>
+<h3 class="sectionHead" id="when-running-requests-exhaust-the-pool"><span class="titlemark">5.3   </span> <a id="x1-780005.3"></a>When running requests exhaust the pool</h3>
+<p class="noindent">Admission is not the last memory decision. A request already producing tokens can need another
+block. <em>Preemption </em>means taking resources away from such a request so another can proceed. It
+may suspend work for later recovery or terminate the request. DeepInfer has both
+outcomes.
+</p><p class="indent">   Run a second experiment:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/12_preempt.py
+</code></pre></div>
+<p class="indent">   The pool has 19 usable blocks, each with four positions. A, B and C own all of them. B and C
+have just generated a token beyond the end of their last block; that token is in their history but
+has no cache row yet.
+</p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular wide-table" id="TBL-8"><colgroup id="TBL-8-1g"><col id="TBL-8-1"/><col id="TBL-8-2"/><col id="TBL-8-3"/><col id="TBL-8-4"/><col id="TBL-8-5"/></colgroup><tr id="TBL-8-1-" style="vertical-align:baseline;"><td class="td11" id="TBL-8-1-1" style="text-align:left; white-space:nowrap;"> Request  </td><td class="td11" id="TBL-8-1-2" style="text-align:right; white-space:nowrap;"> History length  </td><td class="td11" id="TBL-8-1-3" style="text-align:right; white-space:nowrap;"> Output length  </td><td class="td11" id="TBL-8-1-4" style="text-align:right; white-space:nowrap;"> Processed  </td><td class="td11" id="TBL-8-1-5" style="text-align:right; white-space:nowrap;"> Blocks owned  </td>
+</tr><tr id="TBL-8-2-" style="vertical-align:baseline;"><td class="td11" id="TBL-8-2-1" style="text-align:left; white-space:nowrap;"> A           </td><td class="td11" id="TBL-8-2-2" style="text-align:right; white-space:nowrap;">           20  </td><td class="td11" id="TBL-8-2-3" style="text-align:right; white-space:nowrap;">            8  </td><td class="td11" id="TBL-8-2-4" style="text-align:right; white-space:nowrap;">       19  </td><td class="td11" id="TBL-8-2-5" style="text-align:right; white-space:nowrap;">           5  </td>
+</tr><tr id="TBL-8-3-" style="vertical-align:baseline;"><td class="td11" id="TBL-8-3-1" style="text-align:left; white-space:nowrap;"> B           </td><td class="td11" id="TBL-8-3-2" style="text-align:right; white-space:nowrap;">           45  </td><td class="td11" id="TBL-8-3-3" style="text-align:right; white-space:nowrap;">            2  </td><td class="td11" id="TBL-8-3-4" style="text-align:right; white-space:nowrap;">       44  </td><td class="td11" id="TBL-8-3-5" style="text-align:right; white-space:nowrap;">          11  </td>
+</tr><tr id="TBL-8-4-" style="vertical-align:baseline;"><td class="td11" id="TBL-8-4-1" style="text-align:left; white-space:nowrap;"> C           </td><td class="td11" id="TBL-8-4-2" style="text-align:right; white-space:nowrap;">           13  </td><td class="td11" id="TBL-8-4-3" style="text-align:right; white-space:nowrap;">            4  </td><td class="td11" id="TBL-8-4-4" style="text-align:right; white-space:nowrap;">       12  </td><td class="td11" id="TBL-8-4-5" style="text-align:right; white-space:nowrap;">           3  </td>
+</tr></table></div> </div></div>
+<p class="indent">   Which request should give up its blocks? B owns the most, but it has generated the least
+output. These are different possible priorities. The experiment uses the inspected decode ordering,
+then applies each of the three branch conditions in <code>_preempt</code>:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>stop=False, A.so_status=0
+  output order: [('A', 8), ('C', 4), ('B', 2)]
+  candidate=B; victim=A; blocks A=5, B=11, C=3
+  A: WAITING, processed=0, blocks=[], state=-1
+  waiting=['A', 'D'], ignored=[], free=[3, 2, 1]
+  history retained=True; scheduled=['B', 'C']
+
+stop=True, A.so_status=0
+  output order: [('A', 8), ('C', 4), ('B', 2)]
+  candidate=B; victim=A; blocks A=5, B=11, C=3
+  A: FINISHED_PREEMPTED, processed=19, blocks=[], state=-1
+  waiting=['D'], ignored=['A'], free=[3, 2, 1]
+  history retained=True; scheduled=['B', 'C']
+
+stop=False, A.so_status=1
+  output order: [('A', 8), ('C', 4), ('B', 2)]
+  candidate=B; victim=A; blocks A=5, B=11, C=3
+  A: FINISHED_PREEMPTED, processed=19, blocks=[], state=-1
+  waiting=['D'], ignored=['A'], free=[3, 2, 1]
+  history retained=True; scheduled=['B', 'C']
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/12_preempt.txt">results/12_preempt.txt</a></div></div>
+<p class="indent">   A loses five blocks. B and C take one each, leaving three free. In the first run A goes ahead of
+D in the waiting queue and loses its processed cache count. Its 20-token history survives. In the
+second run a stop flag makes A finish; in the third an active structured-output status does
+so even though the stop flag is false. All three return A’s blocks and state slot. The
+nonzero processed count printed for a finished A is no permission to read its freed
+storage.
+</p>
+<h4 class="subsectionHead" id="read-the-comparator-and-both-ends-of-the-queue"><span class="titlemark">5.3.1   </span> <a id="x1-790005.3.1"></a>Read the comparator and both ends of the queue</h4>
+<p class="noindent">After admitting ready forks from <code>prompted</code>, the decode scheduler sorts <code>running </code>and selects
+requests:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.8.</b> Select from the short-output end; preempt from the other end.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">624</span><span><span class="n">std</span><span class="o">::</span><span class="n">sort</span><span class="p">(</span><span class="n">running</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="w"> </span><span class="n">running</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">625</span><span><span class="w">    </span><span class="p">[](</span><span class="k">const</span><span class="w"> </span><span class="n">SequencePtr</span><span class="w"> </span><span class="o">&amp;</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">SequencePtr</span><span class="w"> </span><span class="o">&amp;</span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">a</span><span class="o">-&gt;</span><span class="n">get_output_len</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">b</span><span class="o">-&gt;</span><span class="n">get_output_len</span><span class="p">();</span><span class="w"> </span><span class="p">});</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">626</span><span><span class="n">scheduled</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">max_seqs</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">627</span><span><span class="kt">size_t</span><span class="w"> </span><span class="n">l</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">running</span><span class="p">.</span><span class="n">size</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">628</span><span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">l</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">scheduled</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">max_seqs</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">629</span><span><span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">seq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">running</span><span class="p">[</span><span class="n">r</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">630</span><span><span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">can_allocate_single_nolock</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">l</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">631</span><span><span class="w">        </span><span class="k">auto</span><span class="w"> </span><span class="n">victim_seq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">running</span><span class="p">[</span><span class="n">l</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">632</span><span><span class="w">        </span><span class="n">_preempt</span><span class="p">(</span><span class="n">victim_seq</span><span class="p">,</span><span class="w"> </span><span class="n">ignored_seqs</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">633</span><span><span class="w">        </span><span class="n">l</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">634</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">635</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">block_manager</span><span class="o">-&gt;</span><span class="n">can_allocate_single_nolock</span><span class="p">())</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">636</span><span><span class="w">        </span><span class="n">_append_slot</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">637</span><span><span class="w">        </span><span class="n">scheduled</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">seq</span><span class="p">));</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">638</span><span><span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">639</span><span><span class="w">        </span><span class="n">_preempt</span><span class="p">(</span><span class="n">seq</span><span class="p">,</span><span class="w"> </span><span class="n">ignored_seqs</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">640</span><span><span class="w">    </span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L624-L640">csrc/engine/scheduler.hpp</a> · lines 624–640</div></div>
+<p class="indent">   The comparator orders output lengths from greatest to least: A, C, B in the experiment. The
+candidate is <code>running[r - 1]</code>, so B goes first. If no block is free, the victim is <code>running[l]</code>, so A is
+preempted. Output length is already generated work, not remaining answer length or allocated
+memory. Nothing here can tell that B will finish soon.
+</p><p class="indent">   Read two nearby comments with that trace in mind. The decode scheduling comment says it
+preempts the shortest output (line 557, author’s translation), while the body takes a victim from
+the longest-output end. In <span class="path"><code>sequence.hpp</code></span>, line 56, the comment on the preemption finish reason
+says that the request occupying the most KV cache is forcibly terminated (author’s translation).
+The example separates those quantities: A is selected although B owns more blocks. The control
+flow also permits recomputation. These comments do not fully describe the inspected
+policy.
+</p><p class="indent">   There is another constraint in the body: even a candidate whose existing tail has space is
+considered only after the free-block check succeeds. <code>_append_slot </code>might then allocate nothing.
+Thus “my table is large enough” does not by itself guarantee that this loop will schedule the
+request. If no other victim remains and no block becomes free, it preempts the candidate itself.
+Pins from chapter 4 matter here: freeing one request does not necessarily free any shared
+block.
+</p><p class="indent">   After choosing survivors, the scheduler sorts them again, this time by total history length,
+before building per-request query lengths (lines 648–657). The first sort determines who survives
+memory pressure; the second determines the batch order passed onwards. Ties in these
+comparators do not establish an arrival-order guarantee <span class="cite">[<a href="references.html#Xdeepinfer-scheduler-policy">37</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="termination-and-recomputation-are-different-contracts"><span class="titlemark">5.3.2   </span> <a id="x1-800005.3.2"></a>Termination and recomputation are different contracts</h4>
+<p class="noindent">The default depends on the entry point. Unless the caller supplies a value, offline <code>LLM </code>sets
+<code>stop_preempted_request </code>to <code>False </code>(<span class="path"><code>llm.py</code></span>, line 68), giving the recovery policy used in the lab’s
+first run. Construction paths that retain the <code>EngineArgs </code>default instead use <code>True</code>
+                                                                                  
+                                                                                  
+(<span class="path"><code>arg_utils.py</code></span>, line 40), which requests termination. The structured-output guard still applies in
+either case <span class="cite">[<a href="references.html#Xdeepinfer-entrypoint">4</a>, <a href="references.html#Xdeepinfer-engine-args">39</a>]</span>.
+</p><p class="indent">   The preemption branch first asks whether it is allowed to recover this request:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.9.</b> A stop flag or nonzero structured-output status prevents recomputation.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">770</span><span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">so_blocks_recompute</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">structured_output</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">771</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">stop_preempted_request</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">so_blocks_recompute</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">772</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">so_blocks_recompute</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">stop_preempted_request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">773</span><span><span class="w">        </span><span class="n">LOG_WARN</span><span class="p">(</span><span class="s">"Request {} is preempted and stops: structured output (so_status {}) can not be recomputed."</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">774</span><span><span class="w">            </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">request</span><span class="p">.</span><span class="n">request_id</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">structured_output</span><span class="p">.</span><span class="n">status</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">775</span><span><span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">776</span><span><span class="w">        </span><span class="n">LOG_WARN</span><span class="p">(</span><span class="s">"Request {} is preempted and stops."</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">request</span><span class="p">.</span><span class="n">request_id</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">777</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">778</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">FINISHED_PREEMPTED</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">779</span><span><span class="w">    </span><span class="n">free_seq_nolock</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">780</span><span><span class="w">    </span><span class="n">ignored_seqs</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">781</span><span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">782</span><span><span class="w">    </span><span class="n">LOG_WARN</span><span class="p">(</span><span class="s">"Request {} is preempted and will be recomputed."</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">request</span><span class="p">.</span><span class="n">request_id</span><span class="p">);</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L770-L782">csrc/engine/scheduler.hpp</a> · lines 770–782</div></div>
+<p class="indent"> <em>Structured output </em>constrains generation to an allowed form, such as a grammar, and carries
+state beyond token IDs. The actual guard is <code>structured_output.status != 0</code>; it is not a test of
+whether the original request merely supplied a grammar. The log message says this state cannot
+be recomputed by the present path. <code>Sequence::reset_for_recompute </code>helps us see the
+boundary:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.10.</b> Reset cached progress, scheduling progress and draft state.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">307</span><span><span class="kt">void</span><span class="w"> </span><span class="nf">reset_for_recompute</span><span class="p">()</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">308</span><span><span class="w">    </span><span class="n">cache</span><span class="p">.</span><span class="n">reset_for_recompute</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">309</span><span><span class="w">    </span><span class="n">schedule</span><span class="p">.</span><span class="n">reset_for_recompute</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">310</span><span><span class="w">    </span><span class="n">mtp</span><span class="p">.</span><span class="n">reset_for_recompute</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">311</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/sequence.hpp#L307-L311">csrc/engine/sequence.hpp</a> · lines 307–311</div></div>
+<p class="indent">   The helpers reset the current and previous processed counts and the SWA valid start; they
+clear both in-flight counters and selected draft state. They do not erase the token history,
+sampling configuration or structured-output matcher (<span class="path"><code>sequence.hpp</code></span>, lines 134–142, 223–227 and
+258–261). A recovery path would have to establish a compatible matcher state too. That is an
+inference from the state separation, not a claim that replaying a grammar is impossible
+<span class="cite">[<a href="references.html#Xdeepinfer-sequence">6</a>]</span>.
+</p><p class="indent">   In the recovery branch, line 783 calls this reset. Its Chinese comment points to the reset
+helpers as the inventory of rolling state (author’s translation). The remaining operations put the
+request back and return its resources:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 5.11.</b> Put recovery work first, then release its allocations.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">785</span><span><span class="w">    </span><span class="n">waiting</span><span class="p">.</span><span class="n">push_front</span><span class="p">(</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">786</span><span><span class="w">    </span><span class="n">seq</span><span class="o">-&gt;</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">WAITING</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">787</span><span><span class="w">    </span><span class="n">free_seq_nolock</span><span class="p">(</span><span class="o">*</span><span class="n">seq</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">788</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L785-L788">csrc/engine/scheduler.hpp</a> · lines 785–788</div></div>
+<p class="indent">   When A returns to prefill in our case, its history still has 20 tokens but its processed count is
+zero. The prompt path therefore sees 20 positions of work, including tokens already
+generated. It rebuilds state for that history; it does not erase the eight output tokens
+and start a new answer. This recovery adds computation and delay. It does not by
+itself prove bitwise identity after replay; chapter 10 separates the relevant correctness
+contracts.
+</p><p class="indent">   In the vLLM comparison, an unspecified preemption mode selects recomputation when
+<code>get_max_num_running_seqs()==1 </code>and swapping otherwise; a configured mode can override
+this. Its recomputation path sets the sequence to <code>WAITING</code>, frees its blocks and resets
+computed progress (<span class="path"><code>vllm/core/scheduler.py</code></span>, lines 1472–1510) <span class="cite">[<a href="references.html#Xvllm-scheduler">13</a>]</span>. DeepInfer also has a
+rebuild-from-history path, but here the choice is between recomputation and termination, with
+engine-type and structured-output guards. Those are different recovery contracts despite the
+shared term <code>preempt</code>.
+</p><p class="indent">   Recomputation also requires a route back to prefill. The scheduler constructor rejects a
+<code>COMPLETION </code>engine with <code>stop_preempted_request=false </code>(lines 102–104): that engine has no
+prefill scheduling path. Termination is reported as <code>insufficient_system_resource </code>by
+<code>get_finished_reason</code>. A larger service could retry elsewhere, but that is not an action
+performed by this branch.
+</p><p class="indent">   Preemption may happen while a previous step is still in flight. In <code>process_outputs</code>, the
+comment and check at lines 917–924 describe skipping results for a decode request already reset
+to <code>WAITING</code>. Otherwise stale output could advance the newly reset count or return the request to
+the wrong queue. This is where scheduling meets chapter 6’s subject: work can finish after the
+host has decided that its result is no longer usable.
+</p>
+<h3 class="sectionHead" id="a-position-budget-is-not-a-time-budget"><span class="titlemark">5.4   </span> <a id="x1-810005.4"></a>A position budget is not a time budget</h3>
+<p class="noindent">The released prefill path caps query positions, request counts, full lengths and allocations.
+These are useful constraints, but they are not equivalent to a maximum step duration.
+Chapter 2 showed that compute and memory costs depend on different quantities.
+Equal query counts can still read different amounts of context or route work to different
+experts.
+</p><p class="indent">   The deployment Q&amp;A describes an additional production policy: a fitted quadratic
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">cost</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>q</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, where
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math> is the number of
+new positions and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>c</mi></mrow></math>
+the cached prefix length. A nanosecond budget named <code>compute_quota_limit </code>and a 32,768-token
+cap constrain the selected chunk. The policy also reduces the budget across a data-parallel group
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. The inspected <code>_schedule_prefill </code>does not implement that quadratic solver. Its printed
+budget branch uses remaining token capacity and alignment. The timed model in the
+Q&amp;A belongs to the documented service; we should not read it into these source lines.
+The runtime model used for draft verification is a separate path, which chapter 8 will
+examine.
+</p><p class="indent">   We can now follow a batch decision from a waiting queue to a worker address, and follow
+memory pressure back to a reset or a reported failure. The remaining question is when those
+decisions can safely be made while an earlier batch is still executing.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next4"><span class="titlemark">5.5   </span> <a id="x1-820005.5"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-82002x1">In <span class="path"><code>labs/11_chunks.py</code></span>, remove the per-step overhead. Predict which first-token
+     delays become equal and which still depend on queue order. Update the expected
+     results before running the altered experiment.
+     </li>
+<li class="enumerate" id="x1-82004x2">In the memory experiment, give A and B equal output lengths. What additional rule
+     would make the victim deterministic? Python’s sort is stable; the C++ call shown
+     here is <code>std::sort</code>. Do not infer the engine’s tie behaviour from the lab.
+     </li>
+<li class="enumerate" id="x1-82006x3">Trace a candidate whose existing block table is large enough when the free list is
+     empty. Locate the check that still causes a preemption. Propose a change, then list
+     the ownership and in-flight cases it would need to preserve. Label the change as a
+     proposal, not an existing DeepInfer policy.
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-82008x4">In <code>_schedule_prefill</code>, compare a first admission, an unfinished chunk and a forked
+     prefix. Which can own a state slot while its status is <code>WAITING</code>? Use this to revisit
+     chapter 4’s extra state-slot exercise.</li></ol>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-04.html"><small>PREVIOUS</small>← State needs an owner</a><a class="next" href="chapter-06.html"><small>NEXT</small>Keep the host and device busy →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#a-smaller-chunk-is-an-opportunity-to-choose">5.1 A smaller chunk is an opportunity to choose</a><a class="" href="#follow-a-prompt-through-the-scheduler">5.2 Follow a prompt through the scheduler</a><a class="toc-sub" href="#choose-prefill-or-decode">5.2.1 Choose prefill or decode</a><a class="toc-sub" href="#the-head-of-the-queue-must-fit">5.2.2 The head of the queue must fit</a><a class="toc-sub" href="#choose-how-many-positions-to-evaluate">5.2.3 Choose how many positions to evaluate</a><a class="toc-sub" href="#prefill-can-keep-decode-waiting">5.2.4 Prefill can keep decode waiting</a><a class="toc-sub" href="#a-chunk-becomes-positions-and-addresses">5.2.5 A chunk becomes positions and addresses</a><a class="" href="#when-running-requests-exhaust-the-pool">5.3 When running requests exhaust the pool</a><a class="toc-sub" href="#read-the-comparator-and-both-ends-of-the-queue">5.3.1 Read the comparator and both ends of the queue</a><a class="toc-sub" href="#termination-and-recomputation-are-different-contracts">5.3.2 Termination and recomputation are different contracts</a><a class="" href="#a-position-budget-is-not-a-time-budget">5.4 A position budget is not a time budget</a><a class="" href="#experiments-to-try-next4">5.5 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

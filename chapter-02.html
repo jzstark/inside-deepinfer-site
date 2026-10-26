@@ -4,10 +4,10 @@
 <body><a class="skip-link" href="#reading">Skip to text</a>
 <aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
 <p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
-<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">READING SAMPLE</div><a class="book-link " href="index.html"><span>00</span>Preface</a><a class="book-link active" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="references.html"><span>↗</span>References</a></nav>
-<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a><p>Preface + chapter 2<br>Other chapters are in the PDF.</p></div></details></aside>
-<div class="reader-layout"><main id="reading"><div class="page-meta"><span>THE WEB EDITION</span><span>READING SAMPLE</span></div>
-<article><p class="chapter-number">CHAPTER 02</p><h1 class="chapterHead" id="where-the-time-goes"><a id="x1-60002"></a>Where the time goes</h1>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link active" href="chapter-02.html" aria-current="page"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 02</p><h1 class="chapterHead" id="where-the-time-goes"><a id="x1-230002"></a>Where the time goes</h1>
 <p class="noindent"><a id="ref-ch:cost"></a>
 </p><p class="indent">   Can a slower generation step produce more tokens per second? In chapter 1, each
 simulated round cost one time unit. A real batch does not have a fixed price: more
@@ -17,7 +17,7 @@ estimate, then trace how its benchmark turns observed step returns into a report
 rate.
 </p>
 
-<div class="tcolorbox questionbox" id="tcolobox-1">
+<div class="tcolorbox questionbox" id="tcolobox-2">
 <div class="tcolorbox-title">
 <p class="noindent">The question</p></div>
 <div class="tcolorbox-content"><p class="noindent">If we put four times as many requests in a batch, how much longer can the step take
@@ -55,7 +55,7 @@ requests per unit time. <em>Latency </em>measures how long a particular event ta
 a cost model to explain the first result, then a timeline to decide which latency we
 mean.
 </p>
-<h3 class="sectionHead" id="give-each-cost-a-unit"><span class="titlemark">2.1   </span> <a id="x1-70002.1"></a>Give each cost a unit</h3>
+<h3 class="sectionHead" id="give-each-cost-a-unit"><span class="titlemark">2.1   </span> <a id="x1-240002.1"></a>Give each cost a unit</h3>
 <p class="noindent">Imagine a step that reads a shared array once and also reads some saved state for each request.
 The shared array could contain model parameters: values reused when predicting for different
 users. We assign four million shared bytes, another 100,000 context bytes per request and
@@ -82,8 +82,6 @@ either.
 <p class="indent">   Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math> count
 active requests and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
 count positions evaluated in this step. The transferred bytes and operation count are
-                                                                                  
-                                                                                  
 </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
 <math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
 <mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>100</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mi>N</mi><mo class="MathClass-punc" stretchy="false">.</mo>
@@ -118,11 +116,9 @@ straightforward.
 </p><p class="indent">   If computation and memory transfer overlap perfectly, their combined duration is
 the larger of these two times. The script also assigns a separate serial overhead
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>20</mn></mrow></math>
-                                                                                  
-                                                                                  
 microseconds, so its step model is <a id="ref-eq:step-cost"></a></p><div class="equation-scroll" tabindex="0"><table class="equation"><tr><td>
 <math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
-<mstyle class="label" id="x1-7001r1"></mstyle><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>h</mi> <mo class="MathClass-bin" stretchy="false">+</mo><mtext class="qopname"> max</mtext><mo> ⁡ </mo> <mspace class="negthinspace" width="-0.17em"></mspace> <mrow><mo fence="true" form="prefix"> (</mo><mrow><mfrac><mrow><mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mstyle class="label" id="x1-24001r1"></mstyle><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>h</mi> <mo class="MathClass-bin" stretchy="false">+</mo><mtext class="qopname"> max</mtext><mo> ⁡ </mo> <mspace class="negthinspace" width="-0.17em"></mspace> <mrow><mo fence="true" form="prefix"> (</mo><mrow><mfrac><mrow><mi>M</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
 <mrow><mi>W</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">,</mo> <mfrac><mrow><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
 <mrow><mi>P</mi></mrow></mfrac> </mrow><mo fence="true" form="postfix">)</mo></mrow><mo class="MathClass-punc" stretchy="false">.</mo>
 </mrow></math></td><td class="eq-no">(2.1)</td></tr></table></div>
@@ -131,7 +127,7 @@ microseconds, so its step model is <a id="ref-eq:step-cost"></a></p><div class="
 smaller cost has not disappeared. Under this overlap assumption, it finishes before the larger
 one.
 </p>
-<h4 class="subsectionHead" id="a-bound-is-not-a-stopwatch"><span class="titlemark">2.1.1   </span> <a id="x1-80002.1.1"></a>A bound is not a stopwatch</h4>
+<h4 class="subsectionHead" id="a-bound-is-not-a-stopwatch"><span class="titlemark">2.1.1   </span> <a id="x1-250002.1.1"></a>A bound is not a stopwatch</h4>
 <p class="noindent">If <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math> and
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> are upper limits on
 achievable rates, then <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>M</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>W</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>F</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>P</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
@@ -150,31 +146,31 @@ timeline.
 can leave a transfer-limited step unchanged because arithmetic does not determine its
 duration.
 </p>
-<h3 class="sectionHead" id="find-what-batching-shares"><span class="titlemark">2.2   </span> <a id="x1-90002.2"></a>Find what batching shares</h3>
+<h3 class="sectionHead" id="find-what-batching-shares"><span class="titlemark">2.2   </span> <a id="x1-260002.2"></a>Find what batching shares</h3>
 <p class="noindent">First keep <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>, as in the
 opening sweep. At small <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>,
 the four-million-byte shared read dominates the memory cost. More requests
 spread that read, and the fixed overhead, across more useful outputs. At larger
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>,
-                                                                                  
-                                                                                  
 the arithmetic cost catches up. The crossover occurs where
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>40</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mi>R</mi></mrow></math>, with both times
 in microseconds: <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>40</mn></mrow></math>.
 Figure <a href="chapter-02.html#ref-fig:cost-curves">2.1</a> plots both costs and the resulting output rate.
+                                                                                  
+                                                                                  
 </p>
-<figure class="figure">
-<p class="noindent" id="-calculated-from-the-hypothetical-model-in-labscostpy-both-panels-use-ordinary-decode-with-one-evaluated-position-and-one-useful-token-per-request-per-step-nr-the-left-shows-the-competing-costs-the-right-shows-output-throughput-both-plots-read-the-csv-saved-by-the-experiment"><img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
+<figure class="figure"><a id="ref-fig:cost-curves"></a>
+<p class="noindent" id="-calculated-from-the-hypothetical-model-in-labscostpy-both-panels-use-ordinary-decode-with-one-evaluated-position-and-one-useful-token-per-request-per-step-nr-the-left-shows-the-competing-costs-the-right-shows-output-throughput-both-plots-read-the-csv-saved-by-the-experiment"><a aria-label="Open figure at full size" class="figure-image" href="webbook4x.svg" rel="noopener" target="_blank"><img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
 ordinary decode, with one evaluated position and one useful token per request per step
 ( N = R ).
 The left shows the competing costs; the right shows output throughput. Both plots read
-the CSV saved by the experiment." loading="lazy" src="sample0x.svg"/>
-<img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
+the CSV saved by the experiment." loading="lazy" src="webbook4x.svg"/></a>
+<a aria-label="Open figure at full size" class="figure-image" href="webbook5x.svg" rel="noopener" target="_blank"><img alt="Figure 2.1: Calculated from the hypothetical model in labs/05_cost.py . Both panels use
 ordinary decode, with one evaluated position and one useful token per request per step
 ( N = R ).
 The left shows the competing costs; the right shows output throughput. Both plots read
-the CSV saved by the experiment." loading="lazy" src="sample1x.svg"/>
-<a id="x1-9001r1"></a>
+the CSV saved by the experiment." loading="lazy" src="webbook5x.svg"/></a>
+<a id="x1-26001r1"></a>
 </p>
 <figcaption class="caption"><span class="id">Figure 2.1: </span><span class="content">Calculated from the hypothetical model in <code>labs/05_cost.py</code>. Both panels use
 ordinary decode, with one evaluated position and one useful token per request per step
@@ -182,7 +178,7 @@ ordinary decode, with one evaluated position and one useful token per request pe
 The left shows the competing costs; the right shows output throughput. Both plots read
 the CSV saved by the experiment.
 </span></figcaption>
-<a id="ref-fig:cost-curves"></a>
+
 </figure>
 <p class="indent">   For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mn>40</mn></mrow></math>, equation <a href="chapter-02.html#ref-eq:step-cost">2.1</a>
 becomes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>R</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>20</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn><mi>R</mi></mrow></math>
@@ -198,7 +194,7 @@ memory capacity and available work.
 capacity <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> and bandwidth
 times <em>arithmetic intensity</em>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>I</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>F</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>M</mi></mrow></math>,
 measured in operations per byte. The original paper calls this <em>operational intensity</em>
-and counts traffic between cache and main memory <span class="cite">[<a href="references.html#Xroofline">9</a>]</span>. Here the crossover has
+and counts traffic between cache and main memory <span class="cite">[<a href="references.html#Xroofline">18</a>]</span>. Here the crossover has
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>I</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>P</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>10</mn></mrow></math> operations per
 byte: 80 million operations divided by eight million bytes. The roofline bound excludes our separately added
 serial overhead <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math>;
@@ -221,7 +217,7 @@ reduces its compute term from 32 to 16 microseconds. Transfer still takes
 the transfer term from 72 to 168 microseconds, and the step grows from 92 to 188. The argument
 for batching survives; the cost curve changes with the workload.
 </p>
-<h4 class="subsectionHead" id="more-positions-can-reuse-the-same-context"><span class="titlemark">2.2.1   </span> <a id="x1-100002.2.1"></a>More positions can reuse the same context</h4>
+<h4 class="subsectionHead" id="more-positions-can-reuse-the-same-context"><span class="titlemark">2.2.1   </span> <a id="x1-270002.2.1"></a>More positions can reuse the same context</h4>
 <p class="noindent">Now hold the request count at 16 and increase only the evaluated positions. The experiment
 keeps transfer at 56 microseconds:
                                                                                   
@@ -241,7 +237,7 @@ compute takes 192 microseconds and the step takes 212. Reusing context makes som
 work cheap; it does not make unlimited work free. Nor are evaluated positions necessarily useful
 output tokens.
 </p>
-<h4 class="subsectionHead" id="bytes-per-element-are-part-of-the-model"><span class="titlemark">2.2.2   </span> <a id="x1-110002.2.2"></a>Bytes per element are part of the model</h4>
+<h4 class="subsectionHead" id="bytes-per-element-are-part-of-the-model"><span class="titlemark">2.2.2   </span> <a id="x1-280002.2.2"></a>Bytes per element are part of the model</h4>
 <p class="noindent">An array’s element count does not yet tell us its byte count. A conventional 32-bit value occupies
 four bytes; a 16-bit value occupies two. Lower-precision formats can use fewer bits for values while
 storing extra information needed to interpret groups of them. Allocation alignment can add
@@ -257,15 +253,16 @@ memory requirements. For a traffic estimate, we must also establish how often th
 are read. Bytes retained in memory and bytes transferred during a step are different
 quantities.
 </p>
-<h3 class="sectionHead" id="count-useful-output-separately"><span class="titlemark">2.3   </span> <a id="x1-120002.3"></a>Count useful output separately</h3>
-<p class="noindent">In the ordinary-decode sweep, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>
+<h3 class="sectionHead" id="count-useful-output-separately"><span class="titlemark">2.3   </span> <a id="x1-290002.3"></a>Count useful output separately</h3>
+<p class="noindent"><a id="ref-sec:useful-rate"></a>
+</p><p class="indent">   In the ordinary-decode sweep, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>
 evaluated positions produce <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>
 useful tokens. Verification breaks this equality. A later chapter will let a cheaper predictor
 propose tokens that the main model checks; some checked positions may not become output. Let
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>U</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> be the
 useful output from a step. The rate we want is <a id="ref-eq:useful-rate"></a></p><div class="equation-scroll" tabindex="0"><table class="equation"><tr><td>
 <math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
-<mstyle class="label" id="x1-12001r2"></mstyle><mstyle class="text"><mtext>useful throughput</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>U</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mstyle class="label" id="x1-29001r2"></mstyle><mstyle class="text"><mtext>useful throughput</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>U</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
 <mrow><mi>T</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>R</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>N</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></mfrac><mo class="MathClass-punc" stretchy="false">.</mo>
 </mrow></math></td><td class="eq-no">(2.2)</td></tr></table></div>
 <p class="indent">   For repeated steps of different sizes, measure total useful tokens divided by total elapsed time.
@@ -294,7 +291,7 @@ arithmetic can shorten a compute-limited step. This is an interpretation, not a 
 those figures. Chapter 8 will combine acceptance with measured costs; the hypothetical constants
 cannot choose a production budget.
 </p>
-<h3 class="sectionHead" id="read-a-request-timeline"><span class="titlemark">2.4   </span> <a id="x1-130002.4"></a>Read a request timeline</h3>
+<h3 class="sectionHead" id="read-a-request-timeline"><span class="titlemark">2.4   </span> <a id="x1-300002.4"></a>Read a request timeline</h3>
 <p class="noindent">A step duration does not say how long a user waits for the first token. The next experiment reads
 <span class="path"><code>labs/data/06_request_trace.json</code></span>, a saved teaching trace with assigned timestamps. All
 events use the same observation clock and all times are in milliseconds. The records specify
@@ -308,17 +305,17 @@ that span at 42, and delivers tokens at 45, 49 and 65. How much of its first-tok
 wait occurs before prompt work starts? Figure <a href="chapter-02.html#ref-fig:latency-boundaries">2.2</a> marks the boundaries the script
 uses.
 </p>
-<figure class="figure">
-<p class="noindent" id="-the-observation-boundaries-used-by-the-trace-experiment-all-events-use-one-clock-widths-are-schematic-the-firsttoken-wait-and-later-token-gaps-measure-different-intervals"><img alt="Figure 2.2: The observation boundaries used by the trace experiment. All events use one
+<figure class="figure"><a id="ref-fig:latency-boundaries"></a>
+<p class="noindent" id="-the-observation-boundaries-used-by-the-trace-experiment-all-events-use-one-clock-widths-are-schematic-the-firsttoken-wait-and-later-token-gaps-measure-different-intervals"><a aria-label="Open figure at full size" class="figure-image" href="webbook6x.svg" rel="noopener" target="_blank"><img alt="Figure 2.2: The observation boundaries used by the trace experiment. All events use one
 clock. Widths are schematic; the first-token wait and later token gaps measure different
-intervals." loading="lazy" src="sample2x.svg"/>
-<a id="x1-13001r2"></a>
+intervals." loading="lazy" src="webbook6x.svg"/></a>
+<a id="x1-30001r2"></a>
 </p>
 <figcaption class="caption"><span class="id">Figure 2.2: </span><span class="content">The observation boundaries used by the trace experiment. All events use one
 clock. Widths are schematic; the first-token wait and later token gaps measure different
 intervals.
 </span></figcaption>
-<a id="ref-fig:latency-boundaries"></a>
+
 </figure>
 <p class="indent">   For arrival <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>,
 prompt start <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math>,
@@ -387,7 +384,7 @@ intervening waits. Likewise, device execution, host processing and delivery can 
 requests. Adding every recorded operation duration is not generally a way to recover wall-clock
 time.
 </p>
-<h4 class="subsectionHead" id="look-beyond-an-average"><span class="titlemark">2.4.1   </span> <a id="x1-140002.4.1"></a>Look beyond an average</h4>
+<h4 class="subsectionHead" id="look-beyond-an-average"><span class="titlemark">2.4.1   </span> <a id="x1-310002.4.1"></a>Look beyond an average</h4>
 <p class="noindent">The five TTFTs have a mean of 19.2 milliseconds, but the slowest request waits 42. The script
 also reports sample percentiles. It sorts the values and chooses the element at rank
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mi mathvariant="italic">pN</mi><mo class="MathClass-close" stretchy="false">⌉</mo></mrow></math>,
@@ -410,7 +407,7 @@ the last delivery: 200 tokens per second. This whole-trace rate includes the ini
 completion. It is not a steady-state decode rate. An observation window chosen to include only
 busy steps would have a different denominator.
 </p>
-<h3 class="sectionHead" id="trace-work-and-measurements-through-deepinfer"><span class="titlemark">2.5   </span> <a id="x1-150002.5"></a>Trace work and measurements through DeepInfer</h3>
+<h3 class="sectionHead" id="trace-work-and-measurements-through-deepinfer"><span class="titlemark">2.5   </span> <a id="x1-320002.5"></a>Trace work and measurements through DeepInfer</h3>
 <p class="noindent">Chapter 1 followed requests through admission, scheduling and execution. We now follow the
 quantities attached to that work: selected positions, estimated operations, observed intervals and
 reported throughput. Figure <a href="chapter-02.html#ref-fig:measurement-path">2.3</a> adds two paths around the same engine. Keeping them separate
@@ -419,20 +416,20 @@ prevents a common mistake: treating a count of operations as if it were a measur
                                                                                   
 time taken to execute them.
 </p>
-<figure class="figure">
-<p class="noindent" id="-two-accounting-paths-around-the-engine-in-figure-the-upper-path-estimates-scheduled-work-the-lower-observes-elapsed-time-the-benchmarks-tokenrate-formula-uses-the-lower-path-plus-request-and-draft-counts-not-the-flops-estimate-deepinferschedulerdeepinferflopsdeepinferenginedeepinferbenchmark"><img alt="Figure 2.3: Two  accounting  paths  around  the  engine  in  Figure 1.4 .  The  upper  path
+<figure class="figure"><a id="ref-fig:measurement-path"></a>
+<p class="noindent" id="-two-accounting-paths-around-the-engine-in-figure-the-upper-path-estimates-scheduled-work-the-lower-observes-elapsed-time-the-benchmarks-tokenrate-formula-uses-the-lower-path-plus-request-and-draft-counts-not-the-flops-estimate-deepinferschedulerdeepinferflopsdeepinferenginedeepinferbenchmark"><a aria-label="Open figure at full size" class="figure-image" href="webbook7x.svg" rel="noopener" target="_blank"><img alt="Figure 2.3: Two  accounting  paths  around  the  engine  in  Figure 1.4 .  The  upper  path
 estimates scheduled work; the lower observes elapsed time. The benchmark’s token-rate
-formula  uses  the  lower  path  plus  request  and  draft  counts,  not  the  FLOPs  estimate [ 4 , 5 , 3 , 6 ] ." loading="lazy" src="sample3x.svg"/>
-<a id="x1-15001r3"></a>
+formula  uses  the  lower  path  plus  request  and  draft  counts,  not  the  FLOPs  estimate [ 8 , 14 , 5 , 15 ] ." loading="lazy" src="webbook7x.svg"/></a>
+<a id="x1-32001r3"></a>
 </p>
-<figcaption class="caption"><span class="id">Figure 2.3:  </span><span class="content">Two  accounting  paths  around  the  engine  in  Figure <a class="pdf-ref" href="book.pdf#nameddest=figure.caption.6" title="Open this reference in the complete PDF">1.4</a>.  The  upper  path
+<figcaption class="caption"><span class="id">Figure 2.3:  </span><span class="content">Two  accounting  paths  around  the  engine  in  Figure <a href="chapter-01.html#ref-fig:deepinfer-path">1.4</a>.  The  upper  path
 estimates scheduled work; the lower observes elapsed time. The benchmark’s token-rate
 formula  uses  the  lower  path  plus  request  and  draft  counts,  not  the  FLOPs  estimate
-<span class="cite">[<a href="references.html#Xdeepinfer-scheduler">4</a>, <a href="references.html#Xdeepinfer-flops">5</a>, <a href="references.html#Xdeepinfer-engine">3</a>, <a href="references.html#Xdeepinfer-benchmark">6</a>]</span>.
+<span class="cite">[<a href="references.html#Xdeepinfer-scheduler">8</a>, <a href="references.html#Xdeepinfer-flops">14</a>, <a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-benchmark">15</a>]</span>.
 </span></figcaption>
-<a id="ref-fig:measurement-path"></a>
+
 </figure>
-<h4 class="subsectionHead" id="from-scheduled-positions-to-an-operation-count"><span class="titlemark">2.5.1   </span> <a id="x1-160002.5.1"></a>From scheduled positions to an operation count</h4>
+<h4 class="subsectionHead" id="from-scheduled-positions-to-an-operation-count"><span class="titlemark">2.5.1   </span> <a id="x1-330002.5.1"></a>From scheduled positions to an operation count</h4>
 <p class="noindent">The C++ scheduler constructs per-request metadata after selecting a batch. Inside its loop over
 selected sequences, it obtains two lengths:
 </p>
@@ -491,7 +488,7 @@ row ranges when it counts truncated prefill.
 store them in <code>attn_tflops </code>and <code>total_tflops</code>. Despite their names, these fields hold
 tera-operation <em>amounts </em>for the scheduled batch, not operations per second. The engine copies
 them into <code>StepStats </code>during post-processing. No elapsed time appears in the estimator call or
-that unit conversion <span class="cite">[<a href="references.html#Xdeepinfer-scheduler">4</a>, <a href="references.html#Xdeepinfer-flops">5</a>, <a href="references.html#Xdeepinfer-engine">3</a>]</span>.
+that unit conversion <span class="cite">[<a href="references.html#Xdeepinfer-scheduler">8</a>, <a href="references.html#Xdeepinfer-flops">14</a>, <a href="references.html#Xdeepinfer-engine">5</a>]</span>.
 </p><p class="indent">   Notice the direction of the dependency: selected lengths feed this logging branch. This call is
 not choosing the verification budget. DSpark’s documented use of a profiled cost curve is a
 different path, which chapter 8 will trace. The distinction matters when locating code to
@@ -499,7 +496,7 @@ investigate a scheduling choice.
                                                                                   
                                                                                   
 </p>
-<h4 class="subsectionHead" id="an-operation-estimate-has-a-scope"><span class="titlemark">2.5.2   </span> <a id="x1-170002.5.2"></a>An operation estimate has a scope</h4>
+<h4 class="subsectionHead" id="an-operation-estimate-has-a-scope"><span class="titlemark">2.5.2   </span> <a id="x1-340002.5.2"></a>An operation estimate has a scope</h4>
 <p class="noindent">A floating-point operation is often abbreviated to <em>FLOP</em>. Counting a multiply and an addition as
 two operations is a common convention. DeepInfer’s estimator goes further: it assigns
 format-dependent weights to express work in FP8-equivalent FLOPs.
@@ -528,7 +525,7 @@ element. The factor for a multiply-add is already included: the FP8 coefficient 
 BF16 coefficient is four. The comment’s FP32/TF32 precision weight of four likewise becomes the
 code’s coefficient of eight after multiplication by two. Dividing this estimate by an arbitrary
 device’s advertised operation rate would mix conventions unless the rate uses compatible weights
-and scope <span class="cite">[<a href="references.html#Xdeepinfer-flops">5</a>]</span>.
+and scope <span class="cite">[<a href="references.html#Xdeepinfer-flops">14</a>]</span>.
 </p><p class="indent">   The comments also exclude draft-model work, padding and replicas, and say
 that scheduled lengths have not incorporated acceptance or ZOS corrections. The
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math> and
@@ -538,7 +535,7 @@ of what every kernel finally ran. A higher main-model FLOPs rate does not prove 
 request completed sooner, especially if extra work outside that count was used to obtain
 it.
 </p>
-<h4 class="subsectionHead" id="a-benchmark-chooses-its-observation-window"><span class="titlemark">2.5.3   </span> <a id="x1-180002.5.3"></a>A benchmark chooses its observation window</h4>
+<h4 class="subsectionHead" id="a-benchmark-chooses-its-observation-window"><span class="titlemark">2.5.3   </span> <a id="x1-350002.5.3"></a>A benchmark chooses its observation window</h4>
 <p class="noindent">Now follow the lower path in Figure <a href="chapter-02.html#ref-fig:measurement-path">2.3</a>. The benchmark drives the same <code>LLMEngine.step </code>that
 chapter 1 inspected, but it controls when step returns enter a measurement window. A bounded
 queue stores timestamps and flags:
@@ -596,19 +593,19 @@ arrivals. If an intervening call fails the concurrency check, it creates no entr
 elapsed time can still lie between stored endpoints. There is no separate counter of those
 omitted calls in <code>stable_decode</code>. The selected-window rate is most straightforward when
 concurrency stays stable, which is what the benchmark arranges its workload to study
-<span class="cite">[<a href="references.html#Xdeepinfer-benchmark">6</a>]</span>.
+<span class="cite">[<a href="references.html#Xdeepinfer-benchmark">15</a>]</span>.
 </p>
-<h4 class="subsectionHead" id="follow-one-interval-through-the-filter"><span class="titlemark">2.5.4   </span> <a id="x1-190002.5.4"></a>Follow one interval through the filter</h4>
+<h4 class="subsectionHead" id="follow-one-interval-through-the-filter"><span class="titlemark">2.5.4   </span> <a id="x1-360002.5.4"></a>Follow one interval through the filter</h4>
 <p class="noindent">Use four assigned endpoint times to read the filter. These milliseconds are illustrative inputs, not
 benchmark results; the implementation stores seconds. </p>
 <div class="center">
 
 <div class="tabular">
-<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-1"><colgroup id="TBL-1-1g"><col id="TBL-1-1"/><col id="TBL-1-2"/><col id="TBL-1-3"/><col id="TBL-1-4"/></colgroup><tr id="TBL-1-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-1-1" style="text-align:right; white-space:nowrap;">Endpoint (ms)  </td><td class="td11" id="TBL-1-1-2" style="text-align:right; white-space:nowrap;"> Flush flag  </td><td class="td11" id="TBL-1-1-3" style="text-align:right; white-space:nowrap;"> Interval (ms)  </td><td class="td10" id="TBL-1-1-4" style="text-align:left; white-space:nowrap;"> Treatment            </td>
-</tr><tr id="TBL-1-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-2-1" style="text-align:right; white-space:nowrap;">            0  </td><td class="td11" id="TBL-1-2-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-2-3" style="text-align:right; white-space:nowrap;">          —  </td><td class="td10" id="TBL-1-2-4" style="text-align:left; white-space:nowrap;"> First endpoint only</td>
-</tr><tr id="TBL-1-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-3-1" style="text-align:right; white-space:nowrap;">            4  </td><td class="td11" id="TBL-1-3-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-3-3" style="text-align:right; white-space:nowrap;">           4  </td><td class="td10" id="TBL-1-3-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
-</tr><tr id="TBL-1-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-4-1" style="text-align:right; white-space:nowrap;">           10  </td><td class="td11" id="TBL-1-4-2" style="text-align:right; white-space:nowrap;">     True  </td><td class="td11" id="TBL-1-4-3" style="text-align:right; white-space:nowrap;">           6  </td><td class="td10" id="TBL-1-4-4" style="text-align:left; white-space:nowrap;"> Exclude               </td>
-</tr><tr id="TBL-1-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-1-5-1" style="text-align:right; white-space:nowrap;">           15  </td><td class="td11" id="TBL-1-5-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-1-5-3" style="text-align:right; white-space:nowrap;">           5  </td><td class="td10" id="TBL-1-5-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
+<div class="table-scroll" tabindex="0"><table class="tabular wide-table" id="TBL-6"><colgroup id="TBL-6-1g"><col id="TBL-6-1"/><col id="TBL-6-2"/><col id="TBL-6-3"/><col id="TBL-6-4"/></colgroup><tr id="TBL-6-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-6-1-1" style="text-align:right; white-space:nowrap;">Endpoint (ms)  </td><td class="td11" id="TBL-6-1-2" style="text-align:right; white-space:nowrap;"> Flush flag  </td><td class="td11" id="TBL-6-1-3" style="text-align:right; white-space:nowrap;"> Interval (ms)  </td><td class="td10" id="TBL-6-1-4" style="text-align:left; white-space:nowrap;"> Treatment            </td>
+</tr><tr id="TBL-6-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-6-2-1" style="text-align:right; white-space:nowrap;">            0  </td><td class="td11" id="TBL-6-2-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-6-2-3" style="text-align:right; white-space:nowrap;">          —  </td><td class="td10" id="TBL-6-2-4" style="text-align:left; white-space:nowrap;"> First endpoint only</td>
+</tr><tr id="TBL-6-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-6-3-1" style="text-align:right; white-space:nowrap;">            4  </td><td class="td11" id="TBL-6-3-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-6-3-3" style="text-align:right; white-space:nowrap;">           4  </td><td class="td10" id="TBL-6-3-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
+</tr><tr id="TBL-6-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-6-4-1" style="text-align:right; white-space:nowrap;">           10  </td><td class="td11" id="TBL-6-4-2" style="text-align:right; white-space:nowrap;">     True  </td><td class="td11" id="TBL-6-4-3" style="text-align:right; white-space:nowrap;">           6  </td><td class="td10" id="TBL-6-4-4" style="text-align:left; white-space:nowrap;"> Exclude               </td>
+</tr><tr id="TBL-6-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-6-5-1" style="text-align:right; white-space:nowrap;">           15  </td><td class="td11" id="TBL-6-5-2" style="text-align:right; white-space:nowrap;">     False  </td><td class="td11" id="TBL-6-5-3" style="text-align:right; white-space:nowrap;">           5  </td><td class="td10" id="TBL-6-5-4" style="text-align:left; white-space:nowrap;"> Keep                   </td>
 </tr></table></div> </div></div>
 <p class="indent"> <code>pairwise </code>forms adjacent pairs before the comprehension applies its filter. The flag at
 10 excludes the interval from 4 to 10; the next pair still starts at 10. The result is
@@ -622,7 +619,7 @@ from service execution. If no eligible intervals remain, <code>measure_decode </
 empty dictionary. A caller must not interpret that as a measured zero-throughput
 run.
 </p>
-<h4 class="subsectionHead" id="from-a-local-step-rate-to-a-reported-token-rate"><span class="titlemark">2.5.5   </span> <a id="x1-200002.5.5"></a>From a local step rate to a reported token rate</h4>
+<h4 class="subsectionHead" id="from-a-local-step-rate-to-a-reported-token-rate"><span class="titlemark">2.5.5   </span> <a id="x1-370002.5.5"></a>From a local step rate to a reported token rate</h4>
 <p class="noindent">The output dictionary converts that step rate into a token rate with this line:
 </p>
 <div class="code-card source-code"><div class="listing-title"><b>Listing 2.12.</b> The reported decode-token formula; enclosing dictionary omitted.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">408</span><span><span class="s2">"decode_tokens_per_s_per_gpu"</span><span class="p">:</span> <span class="n">avg_sps</span> <span class="o">*</span> <span class="n">args</span><span class="o">.</span><span class="n">decode_num_requests</span> <span class="o">*</span> <span class="p">(</span><span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_USE_NEXTN_DECODE</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">cp_size</span><span class="p">,</span></span></span>
@@ -657,7 +654,7 @@ device count; it is not a sum over all ranks divided by all devices. Here <code>
 the total device count and <code>dp_size </code>the number of request-serving ranks, with
 <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mstyle class="text"><mtext class="texttt" mathvariant="monospace">ep_size</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">dp_size</mtext></mstyle><mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">cp_size</mtext></mstyle></mrow></math>. Equal
 rates across ranks would make the two averages agree, but this reporting code does not check that
-condition <span class="cite">[<a href="references.html#Xdeepinfer-benchmark">6</a>, <a href="references.html#Xdeepinfer-launch">7</a>, <a href="references.html#Xdeepinfer-config">8</a>]</span>. Preserve useful output counts and elapsed times for every rank needed in a
+condition <span class="cite">[<a href="references.html#Xdeepinfer-benchmark">15</a>, <a href="references.html#Xdeepinfer-launch">16</a>, <a href="references.html#Xdeepinfer-config">17</a>]</span>. Preserve useful output counts and elapsed times for every rank needed in a
 system-wide comparison.
 </p><p class="indent"> <code>measure_decode </code>returns its dictionary to the rank-0 reporting block. That block formats the
 console result and can save configuration together with the measured fields:
@@ -684,7 +681,7 @@ inspect the window loops and <code>run_decode_step</code>. To change the exclusi
 useful counts over the same time window before changing the reporting formula. Editing the
 FLOPs estimator would address none of those three questions.
 </p>
-<div class="tcolorbox questionbox" id="tcolobox-2">
+<div class="tcolorbox questionbox" id="tcolobox-3">
 <div class="tcolorbox-title">
 <p class="indent">   A cost curve belongs to a hardware setup</p></div>
 <div class="tcolorbox-content"><p class="noindent">The deployment Q&amp;A puts support for multiple accelerator vendors among its system
@@ -700,39 +697,38 @@ the setup being studied. </p>
 contain, which reads remain after caching, and how DeepInfer’s attention layout determines their
 size.
 </p>
-<h3 class="sectionHead" id="experiments-to-try-next"><span class="titlemark">2.6   </span> <a id="x1-210002.6"></a>Experiments to try next</h3>
+<h3 class="sectionHead" id="experiments-to-try-next1"><span class="titlemark">2.6   </span> <a id="x1-380002.6"></a>Experiments to try next</h3>
 <ol class="enumerate1">
-<li class="enumerate" id="x1-21002x1">Impose a 150-microsecond step limit in the hypothetical model. Which integer request
+<li class="enumerate" id="x1-38002x1">Impose a 150-microsecond step limit in the hypothetical model. Which integer request
      count, with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>R</mi></mrow></math>,
      gives  the  highest  output  rate  within  it?  What  changes  if  per-request  traffic  is
      multiplied by four?
      </li>
-<li class="enumerate" id="x1-21004x2">Halve the fixed overhead, then halve the arithmetic cost. Compare the effects at
+<li class="enumerate" id="x1-38004x2">Halve the fixed overhead, then halve the arithmetic cost. Compare the effects at
      <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>
      and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>N</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>64</mn></mrow></math>.
      Which assumption makes each change useful? Then hold <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>16</mn></mrow></math>
      and find the largest <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
      that adds no time over ordinary decode.
      </li>
-<li class="enumerate" id="x1-21006x3">In a scratch copy of the trace, delay all of E’s token deliveries by ten milliseconds
+<li class="enumerate" id="x1-38006x3">In a scratch copy of the trace, delay all of E’s token deliveries by ten milliseconds
      without moving its prompt markers. Which of TTFT, publish gap, later-token gaps
      and whole-trace throughput change?
      </li>
-<li class="enumerate" id="x1-21008x4">For a benchmark report, write down the numerator, the time endpoints and any
+<li class="enumerate" id="x1-38008x4">For a benchmark report, write down the numerator, the time endpoints and any
      excluded intervals. Which additional raw count would let you turn a full-acceptance
      rate into an observed useful-output rate?
      </li>
-<li class="enumerate" id="x1-21010x5">In the assigned endpoint table, mark the endpoint at 15 as a flush too. Which interval
+<li class="enumerate" id="x1-38010x5">In the assigned endpoint table, mark the endpoint at 15 as a flush too. Which interval
      survives? Then mark the endpoint at 4 as a flush: which branch of <code>measure_decode</code>
      runs, and what should a report say?
      </li>
-<li class="enumerate" id="x1-21012x6">Locate the logging branch that calls <code>calc_flops</code>. Explain why reducing its estimate
+<li class="enumerate" id="x1-38012x6">Locate the logging branch that calls <code>calc_flops</code>. Explain why reducing its estimate
      alone  cannot  change  the  number  of  positions  selected  for  verification  or  the
      benchmark’s reported token rate.</li></ol>
-
-</article><nav class="page-turn" aria-label="Sample pages"><a href="index.html"><small>PREVIOUS IN THIS SAMPLE</small>← Preface</a><a class="next" href="book.pdf"><small>CONTINUE READING</small>The complete book ↗</a></nav>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-01.html"><small>PREVIOUS</small>← A generation loop</a><a class="next" href="chapter-03.html"><small>NEXT</small>The model shapes the engine →</a></nav>
 <footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
 <a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
 Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
-<a href="COPYRIGHT.txt">Copyright and permissions</a> · Generated from the book’s LaTeX sources.</footer></main>
-<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#give-each-cost-a-unit">2.1 Give each cost a unit</a><a class="toc-sub" href="#a-bound-is-not-a-stopwatch">2.1.1 A bound is not a stopwatch</a><a class="" href="#find-what-batching-shares">2.2 Find what batching shares</a><a class="toc-sub" href="#more-positions-can-reuse-the-same-context">2.2.1 More positions can reuse the same context</a><a class="toc-sub" href="#bytes-per-element-are-part-of-the-model">2.2.2 Bytes per element are part of the model</a><a class="" href="#count-useful-output-separately">2.3 Count useful output separately</a><a class="" href="#read-a-request-timeline">2.4 Read a request timeline</a><a class="toc-sub" href="#look-beyond-an-average">2.4.1 Look beyond an average</a><a class="" href="#trace-work-and-measurements-through-deepinfer">2.5 Trace work and measurements through DeepInfer</a><a class="toc-sub" href="#from-scheduled-positions-to-an-operation-count">2.5.1 From scheduled positions to an operation count</a><a class="toc-sub" href="#an-operation-estimate-has-a-scope">2.5.2 An operation estimate has a scope</a><a class="toc-sub" href="#a-benchmark-chooses-its-observation-window">2.5.3 A benchmark chooses its observation window</a><a class="toc-sub" href="#follow-one-interval-through-the-filter">2.5.4 Follow one interval through the filter</a><a class="toc-sub" href="#from-a-local-step-rate-to-a-reported-token-rate">2.5.5 From a local step rate to a reported token rate</a><a class="" href="#experiments-to-try-next">2.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#give-each-cost-a-unit">2.1 Give each cost a unit</a><a class="toc-sub" href="#a-bound-is-not-a-stopwatch">2.1.1 A bound is not a stopwatch</a><a class="" href="#find-what-batching-shares">2.2 Find what batching shares</a><a class="toc-sub" href="#more-positions-can-reuse-the-same-context">2.2.1 More positions can reuse the same context</a><a class="toc-sub" href="#bytes-per-element-are-part-of-the-model">2.2.2 Bytes per element are part of the model</a><a class="" href="#count-useful-output-separately">2.3 Count useful output separately</a><a class="" href="#read-a-request-timeline">2.4 Read a request timeline</a><a class="toc-sub" href="#look-beyond-an-average">2.4.1 Look beyond an average</a><a class="" href="#trace-work-and-measurements-through-deepinfer">2.5 Trace work and measurements through DeepInfer</a><a class="toc-sub" href="#from-scheduled-positions-to-an-operation-count">2.5.1 From scheduled positions to an operation count</a><a class="toc-sub" href="#an-operation-estimate-has-a-scope">2.5.2 An operation estimate has a scope</a><a class="toc-sub" href="#a-benchmark-chooses-its-observation-window">2.5.3 A benchmark chooses its observation window</a><a class="toc-sub" href="#follow-one-interval-through-the-filter">2.5.4 Follow one interval through the filter</a><a class="toc-sub" href="#from-a-local-step-rate-to-a-reported-token-rate">2.5.5 From a local step rate to a reported token rate</a><a class="" href="#experiments-to-try-next1">2.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

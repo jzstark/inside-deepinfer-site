@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Source edition and excerpts · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link active" href="appendix-c.html" aria-current="page"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">APPENDIX C</p><h1 class="appendixHead" id="source-edition-and-excerpts"><a id="x1-204000C"></a>Source edition and excerpts</h1>
+<p class="noindent"><a id="ref-app:sources"></a>
+</p><p class="indent">   The inspected DeepInfer files match upstream commit <code>774ce244b87cc0eb8d4b94ab9f5de2ab22049f01</code>.
+All DeepInfer file entries in <span class="path"><code>source-manifest.json</code></span> were compared by SHA-256 with that
+commit. This identifies the source used here; it does not pin a model checkpoint, submodule
+installation or a tested engine environment.
+</p><p class="indent">   The experiments, saved outputs, excerpts, manifest and checking tool are published in the
+companion repository <a class="url" href="https://github.com/jzstark/inside-deepinfer-code"><code>https://github.com/jzstark/inside-deepinfer-code</code></a> under the
+Apache License 2.0. Paths such as <span class="path"><code>labs/</code></span>, <span class="path"><code>results/</code></span> and <span class="path"><code>excerpts/</code></span> below are relative to its root,
+and commands such as <code>make labs </code>and <code>make check </code>run there. Its tags identify the code for each
+published edition; use the tag that matches your copy of the book, since the default branch may
+contain later corrections.
+</p><p class="indent">   Source paths in the chapters are relative to the DeepInfer repository. Printed excerpts are
+contiguous source lines saved under <span class="path"><code>excerpts/</code></span>, with original line numbers and common leading
+indentation removed. The manifest records paths, source ranges, removed indentation and hashes;
+code and comments are otherwise unchanged. These fragments are for reading, not standalone
+programs. DeepInfer’s Apache 2.0 licence is included in <span class="path"><code>excerpts/LICENSE</code></span>; the references link to
+the fixed source edition. The book builds without an engine checkout. To verify the excerpts
+against a local snapshot, run <code>make check DEEPINFER_SOURCE=/path/to/DeepInfer</code>. The check
+verifies source hashes, line ranges, removed indentation and excerpt hashes without rewriting
+them.
+</p><p class="indent">   The manifest also records a historical comparison with vLLM v0.6.3, commit
+<code>fd47e57f4b0d5f7920903490bce13bc9e49d8dba</code>. Its engine and sequence files
+support the terminology comparison; its scheduler supports chapter 5’s queue and
+preemption comparison. Chapter 7 also compares DeepSeek’s standalone EPLB at
+<code>d52c72d5b2f2fb4c41afbf8eb21366820239913d</code>, recording the policy and README hashes.
+These comparisons establish differences at fixed versions, not DeepInfer’s fork point or direct
+derivation of its EPLB policy. <code>make check </code>covers the DeepInfer snapshot and its book excerpts;
+the separate comparison sources were checked manually.
+</p><p class="indent">   Chapter 7’s placement lab imports <span class="path"><code>labs/vendor/eplb_policy.py</code></span>, an unmodified copy
+of <span class="path"><code>deepinfer/model_executor/eplb/policy.py</code></span> that <code>make check </code>verifies like any
+excerpt. The same chapter quotes the gate’s replica rule from two libraries outside the
+DeepInfer repository: DeepGEMM at the commit pinned by DeepInfer’s <span class="path"><code>vendor/DeepGEMM</code></span>
+submodule, and the <code>tile-kernels </code>2.1.0 package named in its <span class="path"><code>requirements.txt</code></span>. The
+manifest records those files’ hashes under <code>dependencies</code>; <code>make check </code>does not fetch or
+verify them. Chapter 10 additionally records the FlashMLA submodule commit from
+DeepInfer’s git tree and its repository URL from <span class="path"><code>.gitmodules</code></span>. That pin identifies
+the dependency; the inspected code is DeepInfer’s caller, not the FlashMLA kernel
+implementation.
+</p><p class="indent">   English renderings of Chinese comments are labelled <em>author’s translation </em>in the surrounding
+prose, with a reference to the original line. A translation is editorial text, not an alteration of the
+quoted code. Source artifacts retain the original comments.
+</p><p class="indent">   The book’s English prose follows the project’s writing guide <span class="cite">[<a href="references.html#Xwriting-guide">3</a>]</span>, which draws on <em>The
+Economist</em>’s principles of clear, concrete and economical explanation.
+</p><p class="indent">   The twenty-eight teaching labs have a separate record in <span class="path"><code>results/provenance.json</code></span>: script
+hashes, output hashes, Python version, platform and execution time. For chapter 2, it also records
+the input trace hash and the generated curve-data hash. The trace timestamps are assigned
+teaching data; the saved analysis is actual script output. Re-running <code>make labs </code>refreshes records
+                                                                                  
+                                                                                  
+for the labs it executes. If PyTorch is absent, lab 16’s output and original run record are retained.
+Each run’s <code>execution </code>field records its generating environment and time; the top-level <code>skipped</code>
+list describes skips in the current invocation. Chapter 8 adds exact rational enumeration
+and a translation of the verification budget search. Its provenance also records the
+sourced DSpark input table and the generated synthetic cost curves. The recorded output
+distinguishes DeepSeek’s reported throughput estimates from calculations on assigned
+costs. Chapter 9 checks a rational window model and translated query-range and SWA
+pair-count formulas against direct enumeration. It does not execute the native FLOPs
+estimator or the model equivalence checks. Chapter 10 checks floating-point reduction
+order, a scalar metric counterexample, request-keyed teaching draws and exact PIT
+interval masses. Its inventory of released model tests is based on source inspection,
+not execution of those tests. Chapter 11 adds assigned service queues and capacity
+rates, a translation of the Q&amp;A hit policy, and a frontier from synthetic records. The
+runner hashes its two generated curve CSVs. A separate <code>published_figures </code>manifest
+entry records the upstream PNG hash used for the approximate visual reading; it
+was checked against the fixed commit manually and is not covered by <code>make check</code>.
+The plotted CSVs contain no recovered benchmark measurements. Appendix A adds
+rational compression across chunk boundaries, a ring-lifetime counterexample, integer
+index scores and address conversion. Appendix B translates rank grouping for two
+four-worker layouts. These labs do not execute compression/indexing kernels or start
+distributed processes. These records attest to the teaching runs, not to execution of
+DeepInfer.
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="appendix-b.html"><small>PREVIOUS</small>← Repository and execution map</a><a class="next" href="glossary.html"><small>NEXT</small>Terms and abbreviations →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

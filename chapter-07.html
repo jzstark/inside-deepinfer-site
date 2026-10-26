@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Put experts on several devices · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link active" href="chapter-07.html" aria-current="page"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 07</p><h1 class="chapterHead" id="put-experts-on-several-devices"><a id="x1-970007"></a>Put experts on several devices</h1>
+<p class="noindent"><a id="ref-ch:experts"></a>
+</p><p class="indent">   Chapter 3 placed attention and a feed-forward transformation inside each model layer. We
+now open that second part. DeepSeek’s V4 models use many networks called <em>experts </em>in their MoE
+layers. For every token, a <em>gate </em>scores the experts and chooses a few. Each token therefore uses
+only part of the layer’s weights, but different tokens use different parts. When the experts are
+spread over many devices, tokens must travel to the experts they chose, and the results must
+travel back.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-9">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">How does DeepInfer send each token’s expert work to the devices that hold those
+experts and bring the results back? Why can one busy device limit the benefit, and
+how does the engine move experts to reduce that imbalance? </p>
+</div>
+</div>
+<h3 class="sectionHead" id="dispatch-compute-and-return"><span class="titlemark">7.1   </span> <a id="x1-980007.1"></a>Dispatch, compute and return</h3>
+<p class="noindent">A layer built this way is a <em>mixture of experts </em>(MoE). The gate gives each token a short list of
+chosen experts and a weight for each. The layer’s output is the weighted sum of the chosen
+experts’ outputs. DeepSeek’s design also has a <em>shared expert </em>that every token uses, without being
+chosen <span class="cite">[<a href="references.html#Xdeepseek-v2">28</a>]</span>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/15_dispatch.py
+</code></pre></div>
+<p class="indent">   The experiment gives four experts, A to D, simple integer formulas, and the shared expert the
+formula <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>10</mn></mrow></math>.
+Two devices, called <em>ranks</em>, each own three tokens. Each expert occupies a <em>slot </em>on one rank. The
+routing weights are fractions, so the distributed result can be compared exactly with direct
+evaluation.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>1. one expert per token: slots=['A', 'B', 'C', 'D'], top-1
+  assignments per rank=[5, 1], busiest=5, sent to another rank=4
+  per slot: 0:A=4, 1:B=1, 3:D=1
+2. two weighted experts: slots=['A', 'B', 'C', 'D'], top-2
+  assignments per rank=[8, 4], busiest=8, sent to another rank=6
+  per slot: 0:A=5, 1:B=3, 2:C=2, 3:D=2
+3. same experts, other placement: slots=['A', 'C', 'B', 'D'], top-2
+  assignments per rank=[7, 5], busiest=7, sent to another rank=5
+  per slot: 0:A=5, 1:C=2, 2:B=3, 3:D=2
+4. replicas of A and B: slots=['A', 'B', 'C', 'D', 'A', 'B'], top-2
+  assignments per rank=[6, 6], busiest=6, sent to another rank=4
+  per slot: 0:A=2, 1:B=2, 2:C=2, 3:D=2, 4:A=3, 5:B=1
+token results: (0, 0)=41/2, (0, 1)=21, (0, 2)=65/3, (1, 0)=107/3, (1, 1)=11, (1, 2)=124/5
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/15_dispatch.txt">results/15_dispatch.txt</a></div></div>
+<p class="indent">   The first run gives each token one expert. <em>Dispatch </em>sends each token’s value to the rank
+holding its expert. The receiving rank computes the result, and <em>combine </em>returns it to the token’s
+own rank. A token must carry its identity on the journey, or its result could not be put back in
+the right place. Four of six tokens chose A, so rank 0, which holds A and B, receives five of the six
+assignments.
+</p><p class="indent">   The second run gives each token two experts with weights. A token now creates two
+assignments, possibly on different ranks. Each result is multiplied by its weight before it returns;
+the origin adds the shared expert’s output, computed locally, and the returned contributions. The
+script checks every token’s result against direct evaluation. Rank 0 receives 8 assignments and
+rank 1 only 4.
+</p><p class="indent">   The third run moves B and C between ranks. Every token result is unchanged; only the work
+per rank and the number of assignments crossing ranks change. That is the freedom a placement
+policy uses.
+</p><p class="indent">   The fourth run adds two slots, holding a second copy of A and of B. We now distinguish a
+<em>logical expert</em>, the function the gate chooses, from a <em>physical expert</em>, a copy of its weights in one
+slot. A copy is called a <em>replica</em>. A replica adds another place to compute A; it does not add an
+expert to any token’s choice. The lab picks a replica with DeepInfer’s rule, shown in the next
+section. Rank 0 and rank 1 now receive six assignments each, and the results are still
+                                                                                  
+                                                                                  
+unchanged.
+</p><p class="indent">   The dispatch loop keeps the origin rank and token index with each assignment. <code>replicas</code>
+maps an expert to its slots; integer division finds a slot’s owner:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.1.</b> Choose a replica and keep the token’s return address.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">42</span><span>    <span class="n">per_rank</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">slots</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span>    <span class="n">replicas</span> <span class="o">=</span> <span class="p">{</span><span class="n">e</span><span class="p">:</span> <span class="p">[</span><span class="n">s</span> <span class="k">for</span> <span class="n">s</span><span class="p">,</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">slots</span><span class="p">)</span> <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="n">e</span><span class="p">]</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">EXPERTS</span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span>    <span class="n">inbox</span><span class="p">,</span> <span class="n">sent</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="p">[],</span> <span class="mi">1</span><span class="p">:</span> <span class="p">[]},</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">TOKENS</span><span class="p">:</span>  <span class="c1"># dispatch: each selection goes to one physical slot</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span>        <span class="n">rank</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">picks</span> <span class="o">=</span> <span class="n">token</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span>        <span class="n">norm</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">w</span> <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">picks</span><span class="p">[:</span><span class="n">top_k</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span>        <span class="k">for</span> <span class="n">expert</span><span class="p">,</span> <span class="n">weight</span> <span class="ow">in</span> <span class="n">picks</span><span class="p">[:</span><span class="n">top_k</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">49</span><span>            <span class="n">copies</span> <span class="o">=</span> <span class="n">replicas</span><span class="p">[</span><span class="n">expert</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">50</span><span>            <span class="n">slot</span> <span class="o">=</span> <span class="n">copies</span><span class="p">[(</span><span class="n">rank</span> <span class="o">+</span> <span class="n">index</span> <span class="o">*</span> <span class="mi">23333</span><span class="p">)</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="n">copies</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">51</span><span>            <span class="n">owner</span> <span class="o">=</span> <span class="n">slot</span> <span class="o">//</span> <span class="n">per_rank</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">52</span><span>            <span class="n">inbox</span><span class="p">[</span><span class="n">owner</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(((</span><span class="n">rank</span><span class="p">,</span> <span class="n">index</span><span class="p">),</span> <span class="n">slot</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">weight</span> <span class="o">/</span> <span class="n">norm</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">53</span><span>            <span class="n">sent</span> <span class="o">+=</span> <span class="n">owner</span> <span class="o">!=</span> <span class="n">rank</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/15_dispatch.py">labs/15_dispatch.py</a> · lines 42–53</div></div>
+<p class="indent">   Each owner computes its contributions. The same token key groups them on return, and
+<code>direct </code>supplies a reference without dispatch:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.2.</b> Recombine weighted results by token identity.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">54</span><span>    <span class="n">partial</span> <span class="o">=</span> <span class="p">{}</span>  <span class="c1"># compute on the owner; the weight is applied before return</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">55</span><span>    <span class="k">for</span> <span class="n">owner</span><span class="p">,</span> <span class="n">items</span> <span class="ow">in</span> <span class="n">inbox</span><span class="o">.</span><span class="n">items</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">56</span><span>        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">slot</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">weight</span> <span class="ow">in</span> <span class="n">items</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">57</span><span>            <span class="n">partial</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="p">[])</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">weight</span> <span class="o">*</span> <span class="n">EXPERTS</span><span class="p">[</span><span class="n">slots</span><span class="p">[</span><span class="n">slot</span><span class="p">]](</span><span class="n">x</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">58</span><span>    <span class="n">combined</span> <span class="o">=</span> <span class="p">{(</span><span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">):</span> <span class="n">shared</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="o">+</span> <span class="nb">sum</span><span class="p">(</span><span class="n">partial</span><span class="p">[(</span><span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">)])</span> <span class="k">for</span> <span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">TOKENS</span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">59</span><span>    <span class="n">expected</span> <span class="o">=</span> <span class="p">{(</span><span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">):</span> <span class="n">direct</span><span class="p">((</span><span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">p</span><span class="p">),</span> <span class="n">top_k</span><span class="p">)</span> <span class="k">for</span> <span class="n">r</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">TOKENS</span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/15_dispatch.py">labs/15_dispatch.py</a> · lines 54–59</div></div>
+<p class="indent">   The exact check proves that the teaching model routes and recombines correctly. It does not
+establish that DeepInfer’s floating-point kernels give bitwise-equal results for different placements;
+a different summation order can change the last bits.
+</p>
+<h3 class="sectionHead" id="follow-deepinfers-execution-path"><span class="titlemark">7.2   </span> <a id="x1-990007.2"></a>Follow DeepInfer’s execution path</h3>
+<p class="noindent"><code>DeepseekMoE </code>in <span class="path"><code>v4_modules/mlp.py</code></span> executes the layer; the neighbouring <span class="path"><code>moe.py</code></span> defines the
+parameter containers it receives. Its constructor fixes the slot arithmetic (lines 196–202): the
+number of physical experts is the number of routed logical experts plus the extra replica slots,
+and each rank of the <em>expert-parallel </em>(EP) group holds an equal share. An assertion requires the
+total to divide evenly <span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>]</span>.
+</p><p class="indent">   The execution crosses several repositories, all within DeepSeek’s library stack. DeepGEMM,
+DeepEP and TileKernels supply kernels and communication; DeepInfer connects them to the
+model and the request loop. The boundary is concrete: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-15"><colgroup id="TBL-15-1g"><col id="TBL-15-1"/><col id="TBL-15-2"/></colgroup><tr id="TBL-15-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Boundary</span> </p></td><td class="td10" id="TBL-15-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Division of responsibility</span> </p></td>
+</tr><tr id="TBL-15-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Replica
+selection</span> </p></td><td class="td10" id="TBL-15-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepInfer  supplies  logical-to-physical  maps  and  replica  counts;  the
+  DeepGEMM or TileKernels gate chooses a physical copy.</span> </p></td>
+</tr><tr id="TBL-15-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Dispatch
+and
+combine</span> </p></td><td class="td10" id="TBL-15-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepInfer calls DeepEP’s </span><code>EPBuffer </code><span class="ec-lmr-10">with rows, weights, events and a
+  load counter, and uses the returned handle.</span> </p></td>
+</tr><tr id="TBL-15-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Expert
+computation</span> </p></td><td class="td10" id="TBL-15-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepInfer selects the explicit or fused path and connects the shared
+  contribution; DeepGEMM and TileKernels perform the kernel work.</span> </p></td>
+</tr><tr id="TBL-15-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Load
+balancing</span> </p></td><td class="td10" id="TBL-15-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The statistics window, policy call, weight shuffle and mapping updates
+  are implemented in this repository.</span> </p></td>
+</tr><tr id="TBL-15-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-15-6-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="noindent">The inspected calls and pinned dependencies establish these boundaries <span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>, <a href="references.html#Xdeepinfer-eplb">48</a>, <a href="references.html#Xdeepinfer-dependencies">55</a>]</span>. The model
+determines the routed expert functions and their selections. Extra physical copies are a
+deployment choice for serving uneven routed work, rather than additional logical experts required
+by the model.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="from-a-tokens-choice-to-a-slot"><span class="titlemark">7.2.1   </span> <a id="x1-1000007.2.1"></a>From a token’s choice to a slot</h4>
+<p class="noindent">The forward method has two paths. Begin with the explicit one:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.3.</b> Take the fused path, or gate and dispatch explicitly.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">571</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_mega_moe</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">572</span><span>    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">mega_moe_forward</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">,</span> <span class="n">hidden_states_bf16</span><span class="p">,</span> <span class="n">input_metadata</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">573</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">574</span><span><span class="n">topk_idx</span><span class="p">,</span> <span class="n">topk_weights</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gate_forward</span><span class="p">(</span><span class="n">hidden_states_bf16</span><span class="p">,</span> <span class="n">input_metadata</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">575</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">576</span><span><span class="k">try</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">577</span><span>    <span class="c1"># Dispatch</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">578</span><span>    <span class="n">event_overlap</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dispatch</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">579</span><span>        <span class="n">hidden_states</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">580</span><span>        <span class="n">topk_idx</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">581</span><span>        <span class="n">topk_weights</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">582</span><span>        <span class="n">input_metadata</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">583</span><span>        <span class="kc">None</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">584</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">585</span><span>    <span class="n">moe_in_hidden</span><span class="p">,</span> <span class="n">_dispatched_topk_idx</span><span class="p">,</span> <span class="n">dispatched_topk_weights</span><span class="p">,</span> <span class="n">handle</span> <span class="o">=</span> <span class="n">event_overlap</span><span class="o">.</span><span class="n">current_stream_wait</span><span class="p">()</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L571-L585">deepinfer/model_executor/models/v4_modules/mlp.py</a> · lines 571–585</div></div>
+<p class="indent">   The gate returns, for each token, the chosen experts and their weights. Those indices are
+already physical slots. The gate receives the load balancer’s maps:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.4.</b> The gate maps logical choices to physical slots.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">392</span><span>    <span class="n">to_physical_map</span><span class="o">=</span><span class="n">eplb_layer</span><span class="o">.</span><span class="n">logical_to_physical_map</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">393</span><span>    <span class="n">logical_count</span><span class="o">=</span><span class="n">eplb_layer</span><span class="o">.</span><span class="n">logical_count</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">394</span><span>    <span class="n">scoring_func</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">scoring_func</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">395</span><span>    <span class="n">out</span><span class="o">=</span><span class="n">out</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">396</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">397</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_mega_gate</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">398</span><span>    <span class="n">topk_idx</span><span class="p">,</span> <span class="n">topk_weights</span> <span class="o">=</span> <span class="n">deep_gemm</span><span class="o">.</span><span class="n">bf16_mega_gate</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">gate</span><span class="o">.</span><span class="n">weight</span><span class="p">,</span> <span class="o">**</span><span class="n">gate_kwargs</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">399</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">400</span><span>    <span class="n">topk_idx</span><span class="p">,</span> <span class="n">topk_weights</span> <span class="o">=</span> <span class="n">moe_topk_gate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gate</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">),</span> <span class="o">**</span><span class="n">gate_kwargs</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L392-L400">deepinfer/model_executor/models/v4_modules/mlp.py</a> · lines 392–400</div></div>
+<p class="indent"> <code>to_physical_map </code>lists the slots holding each logical expert, and <code>logical_count</code>
+says how many there are. On GPUs the gate runs in DeepGEMM’s <code>bf16_mega_gate</code>;
+otherwise it uses the TileKernels gate. Both are DeepSeek libraries maintained in separate
+repositories. At DeepInfer’s pinned submodule commit, DeepGEMM chooses a replica by
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mo class="MathClass-open" stretchy="false">(</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">rank</mtext></mstyle> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>23333</mn> <mo class="MathClass-bin" stretchy="false">×</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">token</mtext></mstyle><mo class="MathClass-close" stretchy="false">)</mo><mspace width="0.2em"></mspace><mo class="MathClass-bin" stretchy="false"> mod</mo><mspace width="0.2em"></mspace> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">logical_count</mtext></mstyle><mo class="MathClass-open" stretchy="false">[</mo><mi>e</mi><mo class="MathClass-close" stretchy="false">]</mo><mo class="MathClass-punc" stretchy="false">,</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   where <code>token </code>is the token’s index in its own rank’s batch. The source comment says the
+purpose: spread one logical expert’s tokens over its replicas, differently on every rank. The
+TileKernels version required by DeepInfer uses the same rule <span class="cite">[<a href="references.html#Xdeepgemm-gate">52</a>, <a href="references.html#Xtile-kernels-gate">53</a>]</span>.
+</p><p class="indent">   The rule does not look at current load. It spreads tokens by their index, so replicas
+share work only approximately. In lab 15, A’s five assignments split two and three. The
+placement policy later in this chapter assumes an equal split; that assumption is an
+estimate.
+</p><p class="indent">   Follow token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+in the lab’s fourth run. Its value is 5 and its logical choices are A and C, each with weight
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math>. The layout is ABC/DAB, so
+A’s slots are <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math> and C’s only slot is
+2. For A, the replica rule gives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>23333</mn><mspace width="0.2em"></mspace><mo class="MathClass-bin" stretchy="false"> mod</mo><mspace width="0.2em"></mspace> <mn>2</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn></mrow></math>:
+the second copy, slot 4 on rank 1. For C it gives zero: slot 2 on rank 0. The equivalent row of <code>topk_idx </code>is
+therefore <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, paired
+with <code>topk_weights </code><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+</p>
+<h4 class="subsectionHead" id="through-the-experts-and-back"><span class="titlemark">7.2.2   </span> <a id="x1-1010007.2.2"></a>Through the experts and back</h4>
+<p class="noindent"><code>dispatch </code>hands the hidden states, slot indices and weights to DeepEP’s communication buffer
+<span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>]</span>. Like the asynchronous work in chapter 6, the transfer runs on its own schedule.
+<code>current_stream_wait </code>makes the compute stream wait for its event before using what arrived.
+The results are the rows received by this rank, their weights and a <em>handle</em>. The handle carries the
+bookkeeping needed later: how many received rows belong to each local expert, used by the
+expert computation (line 596), and the routing information needed to send results
+home.
+</p><p class="indent">   For our token, dispatch sends one row to rank 1’s local slot 1 (global slot 4) and one to rank
+0’s local slot 2. The received weights follow those rows into <code>routed_experts_forward</code>; the
+handle’s <code>psum_num_recv_tokens_per_expert </code>describes their grouping by local expert.
+DeepInfer’s rows are hidden-state vectors; the lab uses the scalar 5 so that we can calculate the
+contributions by hand.
+</p><p class="indent">   Where do the weights take effect? Not in combine. Inside the expert computation, the
+activation step receives them:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.5.</b> Routing weights scale each row inside expert computation.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">436</span><span><span class="n">down_in_hidden</span> <span class="o">=</span> <span class="n">swiglu_forward_and_per_token_cast</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">437</span><span>    <span class="n">gate_up_proj_out</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">438</span><span>    <span class="o">**</span><span class="n">_get_swiglu_kwargs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">use_fp8_act</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">439</span><span>    <span class="n">psum_num_tokens_per_expert</span><span class="o">=</span><span class="n">psum_num_recv_tokens_per_expert</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">440</span><span>    <span class="n">topk_weights</span><span class="o">=</span><span class="n">topk_weights</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">441</span><span>    <span class="n">clamp_value</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">swiglu_clamp_value</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">442</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L436-L442">deepinfer/model_executor/models/v4_modules/mlp.py</a> · lines 436–442</div></div>
+<p class="indent">   This matches the lab, which multiplies each result by its weight before return. The name
+<code>combine </code>could suggest that the weighted sum happens there; the code shows that the rows are
+already weighted when they leave the experts.
+</p><p class="indent">   Return and the shared expert follow:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.6.</b> Compute the shared expert locally; combine adds it on return.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">600</span><span><span class="c1"># Combine</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">601</span><span><span class="n">combine_pre_evt</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ep_buffer</span><span class="o">.</span><span class="n">capture</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">602</span><span><span class="k">with</span> <span class="n">limit_num_sms</span><span class="p">(</span><span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_USERBUFFER_COMM_SMS</span><span class="p">,</span> <span class="n">enabled</span><span class="o">=</span><span class="n">PLATFORM</span><span class="o">.</span><span class="n">is_gpu</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">603</span><span>    <span class="n">shared_out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">shared_forward</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">604</span><span><span class="n">event_overlap</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">combine</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">605</span><span>    <span class="n">moe_out_hidden</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">606</span><span>    <span class="n">shared_out</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">607</span><span>    <span class="n">handle</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">608</span><span>    <span class="n">combine_pre_evt</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">609</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">610</span><span><span class="n">moe_combined_hidden</span><span class="p">,</span> <span class="n">_combined_topk_weights</span> <span class="o">=</span> <span class="n">event_overlap</span><span class="o">.</span><span class="n">current_stream_wait</span><span class="p">()</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/mlp.py#L600-L610">deepinfer/model_executor/models/v4_modules/mlp.py</a> · lines 600–610</div></div>
+<p class="indent">   The shared expert runs on the token’s own rank. <code>limit_num_sms </code>lowers the number of
+streaming multiprocessors that its kernels may use by the number set aside for communication, so
+the transfers keep their share of the device (<span class="path"><code>parallel_utils/userbuffer.py</code></span>, lines 40–51).
+<code>combine </code>passes its output as <code>bias </code>(line 505): the shared contribution is added when the routed
+results arrive. A token’s final row is therefore the shared output plus its weighted routed results,
+as in the lab <span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>]</span>.
+</p><p class="indent">   In the scalar trace, A returns <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>5</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>11</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math>
+from rank 1 and C contributes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>5</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>4</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math>
+on rank 0. The dispatch handle lets combine return the remote contribution to the original row on rank 0. The
+shared contribution is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>5</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>10</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>15</mn></mrow></math>,
+supplied as <code>bias </code>in the explicit engine path. The final value is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>11</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>15</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>21</mn></mrow></math>, the lab’s
+result for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+</p>
+<h4 class="subsectionHead" id="the-fused-path"><span class="titlemark">7.2.3   </span> <a id="x1-1020007.2.3"></a>The fused path</h4>
+<p class="noindent">The explicit stages are a readable account of the data movement, but they are not the only path.
+Lines 184–188 require the whole EP group to lie within one NVLink domain, a set of
+devices joined by a fast direct interconnect. They also require either a GPU platform
+or FP8 activations with FP4 weights, and a supported matrix-multiplication format.
+When these conditions hold, <code>forward </code>returns early through <code>mega_moe_forward </code>(lines
+528–563).
+</p><p class="indent">   That method still calls <code>gate_forward</code>, writing the choices into a symmetric buffer
+shared across the group. A single DeepGEMM call then receives the buffer, both expert
+weight matrices, the shared-expert weights when they are fused, and the load counter
+discussed below (line 555). The routing, expert work, shared work and load counting
+                                                                                  
+                                                                                  
+are all present; they are no longer separate Python stages. The README reports its
+decode benchmarks on 64 GPUs within one scale-up domain, the setting in which
+this condition can hold, but the book has not established which path those runs took
+<span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>, <a href="references.html#Xdeepinfer-readme">1</a>]</span>.
+</p>
+<h3 class="sectionHead" id="why-widen-the-expert-group"><span class="titlemark">7.3   </span> <a id="x1-1030007.3"></a>Why widen the expert group?</h3>
+<figure class="figure"><a id="ref-fig:dp-ep"></a>
+<p class="noindent" id="-the-same-four-devices-in-two-stages-of-one-layer-attention-runs-data-parallel-each-rank-processes-its-own-tokens-the-moe-stage-sends-each-selected-expert-assignment-to-the-rank-holding-that-expert-slot-and-returns-the-results-to-the-tokens-origin-where-they-are-summed-arrows-are-illustrative"><a aria-label="Open figure at full size" class="figure-image" href="webbook17x.svg" rel="noopener" target="_blank"><img alt="Figure 7.1: The same four devices in two stages of one layer. Attention runs data parallel:
+each rank processes its own tokens. The MoE stage sends each selected expert assignment
+to the rank holding that expert slot and returns the results to the token’s origin, where
+they are summed. Arrows are illustrative." loading="lazy" src="webbook17x.svg"/></a>
+<a id="x1-103001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 7.1: </span><span class="content">The same four devices in two stages of one layer. Attention runs data parallel:
+each rank processes its own tokens. The MoE stage sends each selected expert assignment
+to the rank holding that expert slot and returns the results to the token’s origin, where
+they are summed. Arrows are illustrative.
+</span></figcaption>
+
+</figure>
+<p class="indent">   Figure <a href="chapter-07.html#ref-fig:dp-ep">7.1</a> shows the arrangement the deployment Q&amp;A describes for V4.1 decode.
+Attention runs with <em>data parallelism </em>(DP): each rank processes its own requests. The MoE
+stage runs with expert parallelism over the same ranks, with the DP size equal to the
+EP size. The Q&amp;A reports decode groups of EP64 to EP128, calls this Wide-EP, and
+says that it substantially reduces per-step memory traffic in the expert part <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. The
+released code supports other group sizes; these numbers are a reported production
+setting.
+</p><p class="indent">   Chapter 2’s cost model explains the attraction. Take an illustrative layer with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>E</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>256</mn></mrow></math> routed experts, each
+token choosing <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>k</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>8</mn></mrow></math>,
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>32</mn></mrow></math>
+tokens per rank. These are teaching numbers, not V4.1’s configuration. With
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> ranks
+and no replicas: </p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-16"><colgroup id="TBL-16-1g"><col id="TBL-16-1"/><col id="TBL-16-2"/><col id="TBL-16-3"/></colgroup><tr id="TBL-16-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-16-1-1" style="text-align:right; white-space:nowrap;">Ranks <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> </td><td class="td11" id="TBL-16-1-2" style="text-align:right; white-space:nowrap;"> Experts per rank <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>E</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>P</mi></mrow></math> </td><td class="td10" id="TBL-16-1-3" style="text-align:right; white-space:nowrap;"> Mean assignments per expert <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">PBk</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>E</mi></mrow></math></td>
+</tr><tr id="TBL-16-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-16-2-1" style="text-align:right; white-space:nowrap;">                                                                                 8  </td><td class="td11" id="TBL-16-2-2" style="text-align:right; white-space:nowrap;">                                                                                         32  </td><td class="td10" id="TBL-16-2-3" style="text-align:right; white-space:nowrap;">                                                                                                    8</td>
+</tr><tr id="TBL-16-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-16-3-1" style="text-align:right; white-space:nowrap;">                                                                                64  </td><td class="td11" id="TBL-16-3-2" style="text-align:right; white-space:nowrap;">                                                                                          4  </td><td class="td10" id="TBL-16-3-3" style="text-align:right; white-space:nowrap;">                                                                                                   64</td>
+</tr></table></div> </div></div>
+<p class="noindent">Holding the per-rank batch fixed, the wider group gives each rank fewer expert weight
+matrices to read per layer, and each matrix serves more tokens on average. In chapter
+2’s terms, the expert computation moves towards higher arithmetic intensity. The
+comparison assumes every expert receives some tokens, the same model and the same
+hardware.
+</p><p class="indent">   Two costs limit the gain. Each rank still sends
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">Bk</mi></mrow></math>
+assignments and receives their results, whatever the group size, and in a wider group a larger
+share of them leave the rank. The step must also wait for the slowest rank. Lab 15’s second run
+had 8 assignments on one rank and 4 on the other. Those counts identify the busiest rank in the
+lab; it has no duration model. Kernel efficiency and communication also affect the time, so the
+counts do not establish step latency.
+</p>
+<h3 class="sectionHead" id="use-history-to-choose-a-placement"><span class="titlemark">7.4   </span> <a id="x1-1040007.4"></a>Use history to choose a placement</h3>
+<p class="noindent">The engine reduces imbalance with <em>expert-parallel load balancing </em>(EPLB): it observes which
+experts were busy and periodically changes which slots hold which experts. Figure <a href="chapter-07.html#ref-fig:eplb-cycle">7.2</a> shows the
+cycle.
+</p>
+<figure class="figure"><a id="ref-fig:eplb-cycle"></a>
+<p class="noindent" id="-the-eplb-cycle-with-rearrangement-enabled-eligible-steps-record-counts-at-an-interval-the-engine-chooses-a-new-placement-moves-weights-and-updates-the-maps-after-either-branch-step-records-load-statistics-and-clears-the-counter-before-the-next-forward-pass-deepinfermoedeepinfereplbdeepinfereplbpolicydeepinfereplbshuffle"><a aria-label="Open figure at full size" class="figure-image" href="webbook18x.svg" rel="noopener" target="_blank"><img alt="Figure 7.2: The EPLB cycle with rearrangement enabled. Eligible steps record counts; at
+an interval, the engine chooses a new placement, moves weights and updates the maps.
+After either branch, step records load statistics and clears the counter before the next
+forward pass [ 47 , 48 , 49 , 50 ] ." loading="lazy" src="webbook18x.svg"/></a>
+<a id="x1-104001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 7.2: </span><span class="content">The EPLB cycle with rearrangement enabled. Eligible steps record counts; at
+an interval, the engine chooses a new placement, moves weights and updates the maps.
+After either branch, <code>step </code>records load statistics and clears the counter before the next
+forward pass <span class="cite">[<a href="references.html#Xdeepinfer-moe">47</a>, <a href="references.html#Xdeepinfer-eplb">48</a>, <a href="references.html#Xdeepinfer-eplb-policy">49</a>, <a href="references.html#Xdeepinfer-eplb-shuffle">50</a>]</span>.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="counting-work"><span class="titlemark">7.4.1   </span> <a id="x1-1050007.4.1"></a>Counting work</h4>
+<p class="noindent">The counter appears in the MoE calls themselves: explicit dispatch passes the layer’s
+<code>expert_count </code>as <code>cumulative_local_expert_recv_stats </code>(line 474), and the fused call passes
+the same tensor (line 555). It has one entry per local physical slot and layer.
+</p><p class="indent">   After sampling, <code>DeepseekForCausalLM </code>calls <code>ExpertLoadBalancer.step </code>(<span class="path"><code>deepseek.py</code></span>, lines
+402–404). That method updates the rearrangement history when enabled, records load
+statistics and finally zeroes the counter. The rearrangement history is a ring of recent
+steps, the <em>window</em>. Every <em>interval </em>of eligible steps, it triggers <code>_rearrange_experts
+</code><span class="cite">[<a href="references.html#Xdeepinfer-eplb">48</a>]</span>.
+</p><p class="indent">   The policy needs counts per logical expert across the whole group, not per local slot.
+First, <code>_rearrange_experts </code>selects this rank’s mapping and allocates space for logical
+counts:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.7.</b> Select the local slots’ logical identities.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">235</span><span><span class="n">window_size</span><span class="p">,</span> <span class="n">num_moe_layers</span><span class="p">,</span> <span class="n">num_local_physical_experts</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_expert_count_window</span><span class="o">.</span><span class="n">shape</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">236</span><span><span class="n">num_physical_experts</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">physical_to_logical_map</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">237</span><span><span class="n">num_logical_experts</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">logical_count</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">238</span><span><span class="n">local_physical_to_logical_map</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">physical_to_logical_map</span><span class="p">[</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">239</span><span>    <span class="p">:,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">240</span><span>    <span class="n">ep_group</span><span class="o">.</span><span class="n">rank</span><span class="p">()</span> <span class="o">*</span> <span class="n">num_local_physical_experts</span> <span class="p">:</span> <span class="p">(</span><span class="n">ep_group</span><span class="o">.</span><span class="n">rank</span><span class="p">()</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">num_local_physical_experts</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">241</span><span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">242</span><span><span class="n">logical_expert_token_counts</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">243</span><span>    <span class="n">window_size</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">244</span><span>    <span class="n">num_moe_layers</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">245</span><span>    <span class="n">num_logical_experts</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">246</span><span>    <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">247</span><span>    <span class="n">device</span><span class="o">=</span><span class="n">local_physical_to_logical_map</span><span class="o">.</span><span class="n">device</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">248</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L235-L248">deepinfer/model_executor/eplb/__init__.py</a> · lines 235–248</div></div>
+<p class="indent">   Next, <code>scatter_add_ </code>adds each local slot’s count to the logical expert that slot held.
+The all-reduce sums over ranks, so replicas on different ranks contribute to one logical
+total:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.8.</b> Aggregate counts across the group, then call the policy.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">249</span><span><span class="n">logical_expert_token_counts</span><span class="o">.</span><span class="n">scatter_add_</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">250</span><span>    <span class="o">-</span><span class="mi">1</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">251</span><span>    <span class="n">local_physical_to_logical_map</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span><span class="o">.</span><span class="n">expand_as</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_expert_count_window</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">252</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">_expert_count_window</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">253</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">254</span><span><span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">logical_expert_token_counts</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">ep_group</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">255</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">256</span><span><span class="n">next_physical_to_logical_map</span><span class="p">,</span> <span class="n">next_logical_to_physical_map</span><span class="p">,</span> <span class="n">next_logical_count</span> <span class="o">=</span> <span class="n">rebalance_experts_global</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">257</span><span>    <span class="n">logical_expert_token_counts</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">258</span><span>    <span class="n">num_physical_experts</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">259</span><span>    <span class="n">num_local_physical_experts</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">260</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L249-L260">deepinfer/model_executor/eplb/__init__.py</a> · lines 249–260</div></div>
+<p class="indent">   The window keeps one row per step; it does not add the steps together. The policy uses that
+structure.
+</p>
+<h4 class="subsectionHead" id="why-keep-the-steps-separate"><span class="titlemark">7.4.2   </span> <a id="x1-1060007.4.2"></a>Why keep the steps separate?</h4>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/16_placement.py
+</code></pre></div>
+<p class="indent">   This experiment requires PyTorch, but no GPU. It loads an unmodified copy of DeepInfer’s
+<span class="path"><code>policy.py</code></span>, checked against the source manifest, and calls <code>rebalance_experts_global </code>directly.
+It imports nothing else from the engine. The saved output records the PyTorch version in
+<span class="path"><code>results/provenance.json</code></span>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>History by step: [[10, 10, 0, 0], [0, 0, 10, 10]]
+  candidate AB/CD: score=40
+  candidate AC/BD: score=20
+  policy AC/BD: score=20
+
+Skewed history by step: [[30, 6, 4, 0], [20, 10, 0, 6], [40, 2, 6, 2]]
+  initial ABC/DAB: score=70.00
+  policy AAD/ABC: score=68.00
+  physical-&gt;logical: ['A', 'A', 'D', 'A', 'B', 'C']
+  logical-&gt;physical: {'A': [0, 3, 1], 'B': [4], 'C': [5], 'D': [2]}
+  replicas: {'A': 3, 'B': 1, 'C': 1, 'D': 1}
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/16_placement.txt">results/16_placement.txt</a></div></div>
+<p class="indent">   The first history has four experts, two ranks and two slots per rank. In step 1 only A and B
+are busy; in step 2 only C and D. Over both steps every expert has 10 tokens, so both placements
+give each rank a total of 20. The steps tell a different story. With AB/CD, rank 0
+does all the work in step 1 and rank 1 all of it in step 2: the busiest rank carries 20 in
+each step, 40 in total. With AC/BD, each rank carries 10 in each step, and the policy
+chooses AC/BD. A policy that saw only the totals could not tell the two placements
+apart. The policy’s score is the sum over steps of the busiest rank’s estimated load:
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<munder class="msub"><mrow><mo>∑</mo>
+</mrow><mrow><mi>t</mi></mrow></munder><munder class="msub"><mrow><mtext class="qopname"> max</mtext><mo> ⁡ </mo> </mrow><mrow><mi>r</mi></mrow></munder><msub><mrow><mi>L</mi></mrow><mrow><mi>t</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>r</mi></mrow></msub><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The lab loads the checked file directly, bypassing the package initialisers:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.9.</b> Load only the vendored policy module.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">def</span> <span class="nf">load_policy</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">spec</span> <span class="o">=</span> <span class="n">importlib</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">spec_from_file_location</span><span class="p">(</span><span class="s2">"eplb_policy"</span><span class="p">,</span> <span class="n">POLICY</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="k">assert</span> <span class="n">spec</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">spec</span><span class="o">.</span><span class="n">loader</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="n">module</span> <span class="o">=</span> <span class="n">importlib</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">module_from_spec</span><span class="p">(</span><span class="n">spec</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>    <span class="n">spec</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">exec_module</span><span class="p">(</span><span class="n">module</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>    <span class="k">return</span> <span class="n">module</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/16_placement.py">labs/16_placement.py</a> · lines 19–24</div></div>
+<p class="indent">   Its <code>place </code>function adds a one-layer dimension to the history, calls the real policy and checks
+the returned maps and replica counts:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.10.</b> Call DeepInfer’s policy and check its maps.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">44</span><span><span class="k">def</span> <span class="nf">place</span><span class="p">(</span><span class="n">policy</span><span class="p">,</span> <span class="n">history</span><span class="p">,</span> <span class="n">num_physical</span><span class="p">,</span> <span class="n">per_rank</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>    <span class="n">tokens</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="n">step</span><span class="p">]</span> <span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="n">history</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int</span><span class="p">)</span>  <span class="c1"># [steps, layers=1, experts]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span>    <span class="n">p2l</span><span class="p">,</span> <span class="n">l2p</span><span class="p">,</span> <span class="n">count</span> <span class="o">=</span> <span class="n">policy</span><span class="o">.</span><span class="n">rebalance_experts_global</span><span class="p">(</span><span class="n">tokens</span><span class="p">,</span> <span class="n">num_physical</span><span class="p">,</span> <span class="n">per_rank</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span>    <span class="n">slots</span><span class="p">,</span> <span class="n">l2p</span><span class="p">,</span> <span class="n">count</span> <span class="o">=</span> <span class="n">p2l</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">l2p</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">count</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">tolist</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span>    <span class="k">for</span> <span class="n">expert</span><span class="p">,</span> <span class="n">physical</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">l2p</span><span class="p">):</span>  <span class="c1"># check both maps and the replica counts</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">49</span><span>        <span class="n">valid</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">physical</span> <span class="k">if</span> <span class="n">p</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">50</span><span>        <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">valid</span><span class="p">)</span> <span class="o">==</span> <span class="n">count</span><span class="p">[</span><span class="n">expert</span><span class="p">]</span> <span class="o">==</span> <span class="n">slots</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">expert</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">51</span><span>        <span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="n">slots</span><span class="p">[</span><span class="n">p</span><span class="p">]</span> <span class="o">==</span> <span class="n">expert</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">valid</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">52</span><span>    <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">slots</span><span class="p">)</span> <span class="o">==</span> <span class="n">num_physical</span> <span class="ow">and</span> <span class="nb">sum</span><span class="p">(</span><span class="n">count</span><span class="p">)</span> <span class="o">==</span> <span class="n">num_physical</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">53</span><span>    <span class="k">return</span> <span class="n">slots</span><span class="p">,</span> <span class="n">l2p</span><span class="p">,</span> <span class="n">count</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/16_placement.py">labs/16_placement.py</a> · lines 44–53</div></div>
+
+<h4 class="subsectionHead" id="two-decisions-replicas-then-places"><span class="titlemark">7.4.3   </span> <a id="x1-1070007.4.3"></a>Two decisions: replicas, then places</h4>
+<p class="noindent"><code>rebalance_experts_global </code>first decides how many copies each logical expert gets. One extra
+slot at a time, it asks which expert’s copy would most reduce the sum over steps of the largest
+per-copy load:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.11.</b> Score each candidate for the next replica.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">111</span><span><span class="n">score</span> <span class="o">=</span> <span class="n">tokens_per_expert_all_diff</span> <span class="o">/</span> <span class="n">logical_count</span>  <span class="c1"># NOTE: Values in score must be different from each other</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">112</span><span><span class="n">score_added</span> <span class="o">=</span> <span class="n">tokens_per_expert</span> <span class="o">/</span> <span class="p">(</span><span class="n">logical_count</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">113</span><span><span class="n">values</span><span class="p">,</span> <span class="n">indices</span> <span class="o">=</span> <span class="n">score</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">114</span><span><span class="n">values</span> <span class="o">=</span> <span class="n">values</span><span class="o">.</span><span class="n">expand_as</span><span class="p">(</span><span class="n">score</span><span class="p">)</span><span class="o">.</span><span class="n">contiguous</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">115</span><span><span class="n">score</span><span class="o">.</span><span class="n">scatter_</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">indices</span><span class="p">,</span> <span class="n">score_added</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">indices</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">116</span><span><span class="n">values</span><span class="o">.</span><span class="n">scatter_</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">indices</span><span class="p">,</span> <span class="n">score</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdim</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span><span class="o">.</span><span class="n">values</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L111-L116">deepinfer/model_executor/eplb/policy.py</a> · lines 111–116</div></div>
+<p class="indent"> <code>score </code>is each expert’s load per copy in each step. <code>score_added </code>is what it would be
+with one more copy. Giving a copy to the current busiest expert lowers the maximum;
+giving it to anyone else leaves the maximum unchanged. After these lines, <code>values</code>
+holds, for each candidate, the step’s largest per-copy load if that candidate received the
+copy. Summing over steps and taking the smallest picks the replica (line 117). Line
+109 adds a tiny amount per expert so that equal loads still have a single maximum
+<span class="cite">[<a href="references.html#Xdeepinfer-eplb-policy">49</a>]</span>.
+</p><p class="indent">   In the lab’s skewed history, A carries 30, 20 and 40 tokens in the three steps, far more than
+any other expert. Both extra slots go to A, giving it three copies.
+</p><p class="indent">   The second decision places the six copies on two ranks of three slots each. The
+helper that does this, <code>_batch_greedy_indices</code>, takes the copies in descending order of
+their total per-copy load over the window (lines 31–35). For each copy it computes, for
+every rank, the score that would result from placing it there (lines 58–60): each step’s
+busiest-rank load after the addition, summed over steps. It then commits the best
+rank:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.12.</b> Place the copy on the best rank that still has a free slot.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">63</span><span><span class="n">rank</span> <span class="o">=</span> <span class="n">scores</span><span class="o">.</span><span class="n">argmin</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">64</span><span><span class="n">occupied</span> <span class="o">=</span> <span class="n">occupancy</span><span class="p">[</span><span class="n">layers</span><span class="p">,</span> <span class="n">rank</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">65</span><span><span class="n">indices</span><span class="p">[</span><span class="n">layers</span><span class="p">,</span> <span class="n">rank</span> <span class="o">*</span> <span class="n">capacity</span> <span class="o">+</span> <span class="n">occupied</span><span class="p">]</span> <span class="o">=</span> <span class="n">physical_order</span><span class="p">[:,</span> <span class="n">job_index</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">66</span><span><span class="n">occupancy</span><span class="p">[</span><span class="n">layers</span><span class="p">,</span> <span class="n">rank</span><span class="p">]</span> <span class="o">=</span> <span class="n">occupied</span> <span class="o">+</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">67</span><span><span class="n">updated</span> <span class="o">=</span> <span class="n">loads</span><span class="p">[</span><span class="n">layers</span><span class="p">,</span> <span class="n">rank</span><span class="p">]</span> <span class="o">+</span> <span class="n">vector</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">68</span><span><span class="n">loads</span><span class="p">[</span><span class="n">layers</span><span class="p">,</span> <span class="n">rank</span><span class="p">]</span> <span class="o">=</span> <span class="n">updated</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">69</span><span><span class="n">torch</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">peaks</span><span class="p">,</span> <span class="n">updated</span><span class="p">,</span> <span class="n">out</span><span class="o">=</span><span class="n">peaks</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/policy.py#L63-L69">deepinfer/model_executor/eplb/policy.py</a> · lines 63–69</div></div>
+<p class="indent">   Full ranks were excluded on line 62, and <code>argmin </code>breaks ties towards the lower rank. The result
+in the lab is AAD/ABC, with an estimated score of 68. The starting layout, ABC/DAB, which
+gives the two extra slots to A and B, scores 70. The lab checks that both maps agree: every slot
+listed for an expert holds that expert, and each expert’s replica count equals its number of
+slots.
+</p><p class="indent">   These scores are estimates in the policy’s own model. The policy divides an expert’s load
+equally among its copies, whereas the gate’s index rule splits them approximately. The algorithm
+is greedy, so it does not guarantee the best placement. The score leaves out communication,
+kernel efficiency and the cost of moving weights. A difference between 70 and 68, or between 40
+                                                                                  
+                                                                                  
+and 20, is not a measured speed-up.
+</p>
+<h4 class="subsectionHead" id="compare-two-deepseek-placement-policies"><span class="titlemark">7.4.4   </span> <a id="x1-1080007.4.4"></a>Compare two DeepSeek placement policies</h4>
+<p class="noindent">DeepSeek also published a standalone EPLB implementation. At the fixed commit <code>d52c72d</code>, it
+already separates logical experts from physical replicas, allocates redundant copies and
+packs them into equal-capacity device groups. Its entry point returns the same three
+kinds of map/count tensors. Its README leaves load prediction to the caller and
+suggests a moving average of historical statistics <span class="cite">[<a href="references.html#Xdeepseek-eplb-standalone">54</a>]</span>. The useful comparison is therefore
+how the two policies represent and use load, not whether replication first appears in
+DeepInfer.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-19"><colgroup id="TBL-19-1g"><col id="TBL-19-1"/><col id="TBL-19-2"/><col id="TBL-19-3"/></colgroup><tr id="TBL-19-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Decision</span> </p></td><td class="td11" id="TBL-19-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Standalone
+  EPLB
+  at
+  </span><code>d52c72d</code> </p></td><td class="td10" id="TBL-19-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepInfer
+  at
+  </span><code>774ce244</code> </p></td>
+</tr><tr id="TBL-19-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Load
+input</span> </p></td><td class="td11" id="TBL-19-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">One
+  scalar
+  per
+  layer
+  and
+  logical
+  expert.</span> </p></td><td class="td10" id="TBL-19-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">One
+  count
+  per
+  step,
+  layer
+  and
+  logical
+  expert.</span> </p></td>
+</tr><tr id="TBL-19-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Next
+replica</span> </p></td><td class="td11" id="TBL-19-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Copy
+  the
+  expert
+  with
+  the
+  largest
+  scalar
+  load
+  per
+  existing
+  replica.</span> </p></td><td class="td10" id="TBL-19-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Score
+  each
+  candidate
+  by
+  the
+  sum
+  of
+  per-step
+  maximum
+  per-copy
+  loads
+  after
+  adding
+  it.</span> </p></td>
+</tr><tr id="TBL-19-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Placement</span> </p></td><td class="td11" id="TBL-19-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Sort
+  scalar
+  copy
+  loads,
+  then
+  choose
+  the
+  least-loaded
+  pack
+  with
+  space.</span> </p></td><td class="td10" id="TBL-19-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Sort
+  total
+  copy
+  loads,
+  then
+  score
+  candidate
+  ranks
+  using
+  per-step
+  maximum
+  rank
+  loads.</span> </p></td>
+</tr><tr id="TBL-19-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Topology</span> </p></td><td class="td11" id="TBL-19-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Entry
+  point
+  selects
+  hierarchical
+  group/node
+  packing
+  or
+  a
+  global
+  fallback.</span> </p></td><td class="td10" id="TBL-19-5-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">The
+  inspected
+  global
+  policy
+  takes
+  physical
+  and
+  per-rank
+  slot
+  counts,
+  without
+  group/node
+  parameters.</span> </p></td>
+</tr><tr id="TBL-19-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-19-6-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="noindent">In the standalone code, <code>replicate_experts </code>chooses copies and <code>balanced_packing </code>places them. The
+entry point is <code>rebalance_experts</code>. Compare these with the two DeepInfer functions just read
+<span class="cite">[<a href="references.html#Xdeepseek-eplb-standalone">54</a>, <a href="references.html#Xdeepinfer-eplb-policy">49</a>]</span>.
+</p><p class="indent">   The input difference can change a decision. Consider two experts with loads
+                                                                                  
+                                                                                  
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>10</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> in one
+step and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>10</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>18</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+in the next, and one spare slot. If the caller supplies totals
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>20</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>18</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> to the
+scalar policy, it copies A. Keeping both steps, a copy of A gives per-step maxima 5 and 18,
+summing to 23; a copy of B gives 10 and 10, summing to 20. DeepInfer’s replica score therefore
+chooses B. The third case in lab 16 calls DeepInfer’s policy with this history, three
+physical slots and one slot per rank. It checks the returned maps and asserts the replica
+counts:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Replica-choice history by step: [[10, 0], [10, 18]]
+  replicas: A=1, B=2
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/16_placement.txt">results/16_placement.txt</a></div></div>
+<p class="indent">   These are calculated loads, not timings. The standalone policy is compared by source
+inspection; this lab runs only DeepInfer’s policy. The chapter’s AB/CD example shows the same
+information loss at the placement stage.
+</p><p class="indent">   This fixed-version comparison establishes implementation differences. It does not identify a
+direct code lineage between the repositories or show that one policy is always better. DeepInfer’s
+runtime contribution, which we follow next, is to collect the history and make the chosen
+placement take effect between model steps.
+</p>
+<h3 class="sectionHead" id="make-the-new-placement-take-effect"><span class="titlemark">7.5   </span> <a id="x1-1090007.5"></a>Make the new placement take effect</h3>
+
+<h4 class="subsectionHead" id="the-slot-budget-is-fixed"><span class="titlemark">7.5.1   </span> <a id="x1-1100007.5.1"></a>The slot budget is fixed</h4>
+<p class="noindent">Extra slots cost memory: each holds a full copy of one expert’s weights in every MoE
+layer. The number is fixed when the model is built. The loader reads a requested
+minimum from <span class="path"><code>DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS</code></span>, which defaults to zero, and
+<code>resolve_num_extra_experts </code>rounds it up so that the total divides evenly among EP ranks
+(<span class="path"><code>model_loader.py</code></span>, lines 83–107; <span class="path"><code>eplb/__init__.py</code></span>, lines 21–28). The example setup requests at
+least 32 (<span class="path"><code>examples/_config.py</code></span>, lines 77–79). As an illustration, 256 routed experts
+plus 32 requested extras make 288 slots; at EP64 the engine adds 32 more so that
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>320</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>64</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>5</mn></mrow></math>. The
+Q&amp;A reports, for decode, one extra slot per GPU before rounding <span class="cite">[<a href="references.html#Xdeepinfer-model-loader">51</a>, <a href="references.html#Xdeepinfer-eplb">48</a>, <a href="references.html#Xdeepinfer-config">17</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   A later policy call does not add slots. It only chooses which logical experts occupy them.
+Comparing configurations with different slot budgets must therefore charge the extra weight
+memory: device memory that chapter 4’s block pool could otherwise use.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="move-weights-then-switch-the-maps"><span class="titlemark">7.5.2   </span> <a id="x1-1110007.5.2"></a>Move weights, then switch the maps</h4>
+<p class="noindent">After the policy returns, <code>_rearrange_experts </code>moves weights and installs the new
+maps:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.13.</b> Shuffle weights into their new slots, then update the maps.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">261</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_intranode_shuffle</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">262</span><span>    <span class="n">expert_model_parallel_shuffle_inplace_intranode</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">263</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">_ipc_weight_buffers</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">264</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">physical_to_logical_map</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">265</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">_expert_weights</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span>        <span class="n">next_physical_to_logical_map</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">267</span><span>        <span class="n">ep_group</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">268</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">269</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">270</span><span>    <span class="n">expert_model_parallel_shuffle_inplace</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">271</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">physical_to_logical_map</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">272</span><span>        <span class="bp">self</span><span class="o">.</span><span class="n">_expert_weights</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">273</span><span>        <span class="n">next_physical_to_logical_map</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">274</span><span>        <span class="n">ep_group</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">275</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">276</span><span><span class="bp">self</span><span class="o">.</span><span class="n">physical_to_logical_map</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">next_physical_to_logical_map</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">277</span><span><span class="bp">self</span><span class="o">.</span><span class="n">logical_to_physical_map</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">next_logical_to_physical_map</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">278</span><span><span class="bp">self</span><span class="o">.</span><span class="n">logical_count</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">next_logical_count</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/__init__.py#L261-L278">deepinfer/model_executor/eplb/__init__.py</a> · lines 261–278</div></div>
+<p class="indent">   The three tensors are updated in place. The per-layer state that the gate receives is a view of
+those same tensors (lines 346–376), so the next forward pass reads the new mapping
+without any other hand-over. The weights must already be in their new slots when that
+happens, which is why the shuffle comes first. The rank-0 metrics path synchronises the
+device around the operation and logs its elapsed time (lines 226–228 and 280–288)
+<span class="cite">[<a href="references.html#Xdeepinfer-eplb">48</a>]</span>.
+</p><p class="indent">   Moving weights has its own hazard. Suppose slot 2 should receive the expert that slot 5 holds,
+while slot 5 should receive slot 2’s expert. Copying one directly into the other would destroy a
+source that is still needed. The general point-to-point shuffle avoids that by staging. Copies
+within a rank and transfers from other ranks both write into separate receive buffers first
+(<span class="path"><code>shuffle.py</code></span>, lines 107–138). Only after every transfer has completed does it write the changed
+slots:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 7.14.</b> Write changed slots from the staging buffers.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">141</span><span><span class="n">recv_slot</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">experts_to_recv</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">142</span><span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_local</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">143</span><span>    <span class="k">if</span> <span class="n">origin_local</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">current_local</span><span class="p">[</span><span class="n">i</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">144</span><span>        <span class="k">continue</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">145</span><span>    <span class="n">src</span> <span class="o">=</span> <span class="n">i</span> <span class="k">if</span> <span class="n">received</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="k">else</span> <span class="n">recv_slot</span><span class="p">[</span><span class="n">current_local</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">146</span><span>    <span class="k">for</span> <span class="n">weight</span><span class="p">,</span> <span class="n">buf</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">weights</span><span class="p">,</span> <span class="n">recv_buffers</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">147</span><span>        <span class="n">weight</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">src</span><span class="p">])</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/eplb/shuffle.py#L141-L147">deepinfer/model_executor/eplb/shuffle.py</a> · lines 141–147</div></div>
+<p class="indent">   Unchanged slots are skipped. A changed slot takes its new weights either from its own staged
+copy or from the buffer that received that expert from another rank. When the whole group lies
+within one NVLink domain, the intranode path instead copies each rank’s weights into
+a shared mirror, one layer at a time. Two barriers bracket the mirror refresh; their
+comments say, in the author’s translation, “wait for every rank to finish reading the
+previous layer’s mirror” and “wait for every rank’s mirror to be ready” (lines 192–195).
+Reads then come from mirrors, or from a slot that has already received its new weights
+<span class="cite">[<a href="references.html#Xdeepinfer-eplb-shuffle">50</a>]</span>.
+</p><p class="indent">   Apply the general shuffle to the lab’s actual transition, ABC/DAB to AAD/ABC. Global slot
+2 on rank 0 must change from C to D. D currently lives in global slot 3, rank 1’s local slot 0.
+Rank 1 sends those weights into rank 0’s receive buffer at local index 2. Once the transfer
+completes, the final loop copies that buffer entry into rank 0’s weight slot 2. Meanwhile C must
+move from old slot 2 to rank 1’s slot 5. Staging both transfers preserves C before slot 2 is
+overwritten. Figure <a href="chapter-07.html#ref-fig:eplb-slot-move">7.3</a> shows these two transfers; the other changed slots use the same
+shuffle.
+</p>
+<figure class="figure"><a id="ref-fig:eplb-slot-move"></a>
+<p class="noindent" id="-two-transfers-in-the-labs-abcdab-to-aadabc-transition-traced-through-deepinfers-general-pp-shuffle-slot-numbers-are-global-each-ranks-receivebuffer-indices-start-at-zero-staging-protects-c-before-slot-receives-d-other-slot-changes-are-omitted"><a aria-label="Open figure at full size" class="figure-image" href="webbook19x.svg" rel="noopener" target="_blank"><img alt="Figure 7.3: Two transfers in the lab’s ABC/DAB to AAD/ABC transition, traced through
+DeepInfer’s general P2P shuffle. Slot numbers are global; each rank’s receive-buffer indices
+start at zero. Staging protects C before slot 2 receives D. Other slot changes are omitted." loading="lazy" src="webbook19x.svg"/></a>
+<a id="x1-111001r3"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 7.3: </span><span class="content">Two transfers in the lab’s ABC/DAB to AAD/ABC transition, traced through
+DeepInfer’s general P2P shuffle. Slot numbers are global; each rank’s receive-buffer indices
+start at zero. Staging protects C before slot 2 receives D. Other slot changes are omitted.
+</span></figcaption>
+
+</figure>
+<p class="indent">   Only after the shuffle is queued does the engine queue the three
+tensor updates. For this layer, <code>physical_to_logical_map </code>becomes
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>A</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>A</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>D</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>A</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>B</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>C</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+The valid entries in <code>logical_to_physical_map </code>are A:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, B:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, C:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>5</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, D:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, with
+<code>logical_count </code><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+A’s list is in the order returned by the policy, not sorted slot order; the replica formula indexes
+that list. These are the lab’s actual outputs.
+</p><p class="indent">   On the next forward pass, consider token
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, which
+selects D in lab 15. D still has one replica, so its replica index is zero. The gate now reads
+<code>logical_to_physical_map</code>[D,0] as 2 rather than 3. Dispatch therefore sends that assignment to
+rank 0 rather than rank 1, and the destination slot now holds D’s weights. The logical
+computation is unchanged; its location has changed.
+</p>
+<h4 class="subsectionHead" id="when-rearrangement-runs"><span class="titlemark">7.5.3   </span> <a id="x1-1120007.5.3"></a>When rearrangement runs</h4>
+<p class="noindent">Rearrangement is off by default. <span class="path"><code>DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL</code></span> defaults to
+zero, and <code>_update_rearrangement </code>returns early in that case (<span class="path"><code>environ.py</code></span>, lines 115–117;
+<span class="path"><code>eplb/__init__.py</code></span>, lines 147–148). For an EP group with more than one rank, <code>step </code>still calls
+<code>_update_load_balance_stats </code>and clears <code>expert_count </code>(lines 131–138). Load statistics,
+including their periodic collective, remain active when rearrangement is off; this is the statistics
+flush discussed in chapter 2. When it is enabled, the window must lie between one step and the
+interval (lines 106–111), and the first rearrangement comes after a quarter of the interval,
+to correct start-up imbalance sooner (lines 121–123). A normal engine leaves prefill
+steps out of the window unless a separate setting asks for a rearrangement straight
+after prefill (lines 83–84 and 149–159). The example setup uses a three-step window
+and, when EPLB is enabled, a 30-step interval (<span class="path"><code>examples/_config.py</code></span>, lines 80–83)
+<span class="cite">[<a href="references.html#Xdeepinfer-environ">30</a>, <a href="references.html#Xdeepinfer-eplb">48</a>, <a href="references.html#Xdeepinfer-config">17</a>]</span>.
+</p><p class="indent">   The deployment Q&amp;A reports very different production settings: a 100-step window and a
+1,000-step interval for prefill, and 1,000 and 10,000 for decode. It reports a ratio of
+slowest to mean rank load of 1.074 and 1.045 for two prefill configurations and 1.090 for
+decode <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>. Those are DeepSeek’s reported measurements; this book has not reproduced
+them.
+</p><p class="indent">   Both settings reflect a trade. A placement is chosen from the past, so it lags a workload that
+changes. Moving weights takes time on every rank. As a teaching model only: if a rearrangement costs
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math> seconds and saves
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math> seconds per step
+for the next <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi></mrow></math> steps,
+it pays when <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">sM</mi> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mi>R</mi></mrow></math>.
+Long intervals bet that expert popularity changes slowly. The rank-0
+log already records rearrangement time, which supplies an observation of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math>. This
+book has not run the engine to obtain that value or measured the subsequent saving
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math> and how long it
+                                                                                  
+                                                                                  
+persists. Choosing <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi></mrow></math>
+needs those measurements.
+</p><p class="indent">   We can now follow a token’s expert work from the gate to another rank and back, and follow
+the counts it leaves behind into a new placement. These choices affect the cost of a forward pass.
+The next chapter asks which draft positions are worth evaluating at that cost, allocating a
+verification budget across requests using predicted useful output and measured step
+times.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next6"><span class="titlemark">7.6   </span> <a id="x1-1130007.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-113002x1">In <span class="path"><code>labs/15_dispatch.py</code></span>, give token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+     the choices A and D. Predict the per-rank assignments in runs 2 and 4 before running
+     the script.
+     </li>
+<li class="enumerate" id="x1-113004x2">Change the replica rule in the lab to always pick the first copy. Which rank becomes
+     busiest in run 4? What does the index rule buy, and what can it not guarantee?
+     </li>
+<li class="enumerate" id="x1-113006x3">In <span class="path"><code>labs/16_placement.py</code></span>, add a third step in which only A and C are busy. Does
+     the policy still choose AC/BD? Compute both scores by hand first.
+     </li>
+<li class="enumerate" id="x1-113008x4">Give the skewed history four slots per rank. How many replicas does each expert
+     receive, and does the score improve? Relate the extra slots to weight memory.
+     </li>
+<li class="enumerate" id="x1-113010x5">Using the teaching model <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">sM</mi> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mi>R</mi></mrow></math>,
+     list the quantities you would need to measure to choose a rearrangement interval,
+     and where in DeepInfer you would record each one.</li></ol>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-06.html"><small>PREVIOUS</small>← Keep the host and device busy</a><a class="next" href="chapter-08.html"><small>NEXT</small>Spend verification work wisely →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#dispatch-compute-and-return">7.1 Dispatch, compute and return</a><a class="" href="#follow-deepinfers-execution-path">7.2 Follow DeepInfer’s execution path</a><a class="toc-sub" href="#from-a-tokens-choice-to-a-slot">7.2.1 From a token’s choice to a slot</a><a class="toc-sub" href="#through-the-experts-and-back">7.2.2 Through the experts and back</a><a class="toc-sub" href="#the-fused-path">7.2.3 The fused path</a><a class="" href="#why-widen-the-expert-group">7.3 Why widen the expert group?</a><a class="" href="#use-history-to-choose-a-placement">7.4 Use history to choose a placement</a><a class="toc-sub" href="#counting-work">7.4.1 Counting work</a><a class="toc-sub" href="#why-keep-the-steps-separate">7.4.2 Why keep the steps separate?</a><a class="toc-sub" href="#two-decisions-replicas-then-places">7.4.3 Two decisions: replicas, then places</a><a class="toc-sub" href="#compare-two-deepseek-placement-policies">7.4.4 Compare two DeepSeek placement policies</a><a class="" href="#make-the-new-placement-take-effect">7.5 Make the new placement take effect</a><a class="toc-sub" href="#the-slot-budget-is-fixed">7.5.1 The slot budget is fixed</a><a class="toc-sub" href="#move-weights-then-switch-the-maps">7.5.2 Move weights, then switch the maps</a><a class="toc-sub" href="#when-rearrangement-runs">7.5.3 When rearrangement runs</a><a class="" href="#experiments-to-try-next6">7.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

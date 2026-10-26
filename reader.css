@@ -735,3 +735,17 @@ math[display="block"] {
     min-width:max-content
   }
 }
+/* The complete book has a longer, grouped chapter list. */
+.book-nav .author { margin-bottom: 26px; }
+.book-nav nav > .nav-label { margin-top: 24px; margin-bottom: 10px; }
+.book-nav nav > .nav-label:first-child { margin-top: 0; }
+.book-link { font-size: 12px; padding-top: 8px; padding-bottom: 8px; }
+.nav-bottom { margin-top: 26px; }
+.figure-image { display: block; flex: 1 1 0; min-width: 0; text-align: center; }
+.figure-image img { width: 100%; height: auto; }
+.figure-image:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
+@media (max-width: 780px) {
+  .figure-image { flex-basis: 100%; }
+}
+.table-scroll .wide-table { min-width: 640px; }
+figure:has(> a[id^="ref-"]:target) { scroll-margin-top: 24px; }

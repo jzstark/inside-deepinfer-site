@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reconstruct state approximately · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link active" href="chapter-09.html" aria-current="page"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 09</p><h1 class="chapterHead" id="reconstruct-state-approximately"><a id="x1-1320009"></a>Reconstruct state approximately</h1>
+<p class="noindent"><a id="ref-ch:replay"></a>
+</p><p class="indent">   Chapter 1 rebuilt a three-entry window by replaying three inputs. Chapter 4 then encountered
+state that DeepInfer deliberately leaves out of its persistent cache. Rebuilding that
+state sounds like the same operation. The difficulty is what an entry contains: a later
+layer caches representations produced by earlier layers, and those representations may
+depend on positions outside the window. DeepInfer shortens prefill by accepting an
+approximation in this local state, while preserving the full source for another part of the
+cache.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-11">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">If each layer reads only three positions, can replaying the last three inputs rebuild
+two layers’ caches exactly? What changes if both layers take their cached entries
+from the same shared input? </p>
+</div>
+</div>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/19_replay.py
+</code></pre></div>
+<p class="indent">   The lab starts with the integers 1 to 8, two layers and a window of three. Each layer adds the
+mean of its visible entries to its current input. One version caches each layer’s own input;
+the other always caches the shared original input. It compares a full prefill with a
+replay of inputs 6, 7 and 8, then uses each resulting cache to process the next input,
+9:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>KV source    last row (full / suffix)  next row (full / suffix)
+shared          22 / 22                   25 / 25
+per-layer       28 / 57/2                 32 / 193/6
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/19_replay.txt">results/19_replay.txt</a></div></div>
+<p class="indent">   Shared inputs preserve both results. Per-layer inputs change the last prefill result from 28 to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>57</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math>, and the next decode
+result from 32 to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>193</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>6</mn></mrow></math>.
+The error survives the handover from prefill to decode. We will find the same dependency
+distinction in DeepInfer’s full block-KV projections and truncated sliding-window attention
+(SWA).
+</p>
+<h3 class="sectionHead" id="where-exact-window-recovery-stops"><span class="titlemark">9.1   </span> <a id="x1-1330009.1"></a>Where exact window recovery stops</h3>
+<p class="noindent">The lab uses identity KV projections: the cached row is the input row itself, and the attention weights are uniform.
+For a layer input <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>h</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+and cached values <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>j</mi></mrow></msub></mrow></math>,
+its rule is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msubsup><mrow><mi>h</mi></mrow><mrow><mi>i</mi></mrow><mrow><mi>′</mi></mrow></msubsup> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mi>h</mi></mrow><mrow>
+<mi>i</mi></mrow></msub> <mo class="MathClass-bin" stretchy="false">+</mo> <mfrac><mrow><mn>1</mn></mrow>
+<mrow><mo class="MathClass-rel" stretchy="false">|</mo><msub><mrow><mi>J</mi></mrow><mrow><mi>i</mi></mrow></msub><mo class="MathClass-rel" stretchy="false">|</mo></mrow></mfrac><munder class="msub"><mrow><mo>∑</mo>
+</mrow><mrow><mi>j</mi><mo class="MathClass-rel" stretchy="false">∈</mo><msub><mrow><mi>J</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></munder><msub><mrow><mi>v</mi></mrow><mrow><mi>j</mi></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><msub><mrow><mi>J</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mo class="MathClass-open" stretchy="false">{</mo><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>s</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>i</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>W</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mtext class="qopname">…</mtext><mo> ⁡ </mo><mo class="MathClass-punc" stretchy="false">,</mo><mi>i</mi><mo class="MathClass-close" stretchy="false">}</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math> is the
+window and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math>
+is the first available position. The full calculation starts at zero; suffix replay starts later. The addition
+of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>h</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math> is a
+<em>residual</em>: it carries that row’s input into its output. This deliberately small rule isolates the
+dependencies without introducing softmax or floating-point round-off.
+</p><p class="indent">   The two versions differ in one line of the layer loop. <code>boundary </code>is the unchanged input, while
+<code>hidden </code>is the preceding layer’s output:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.1.</b> Choose the source of cached rows before computing a layer.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="n">caches</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">depth</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>        <span class="n">kv</span> <span class="o">=</span> <span class="n">boundary</span> <span class="k">if</span> <span class="n">shared</span> <span class="k">else</span> <span class="n">hidden</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>        <span class="n">caches</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">kv</span><span class="p">[</span><span class="o">-</span><span class="n">window</span><span class="p">:])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>        <span class="n">output</span> <span class="o">=</span> <span class="p">[]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">hidden</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>            <span class="n">visible</span> <span class="o">=</span> <span class="n">kv</span><span class="p">[</span><span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">i</span> <span class="o">-</span> <span class="n">window</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>            <span class="n">output</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">value</span> <span class="o">+</span> <span class="nb">sum</span><span class="p">(</span><span class="n">visible</span><span class="p">)</span> <span class="o">/</span> <span class="nb">len</span><span class="p">(</span><span class="n">visible</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>        <span class="n">hidden</span> <span class="o">=</span> <span class="n">output</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>    <span class="k">return</span> <span class="n">hidden</span><span class="p">,</span> <span class="n">caches</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/19_replay.py">labs/19_replay.py</a> · lines 16–25</div></div>
+<p class="indent">   Consider the per-layer version. The first layer’s full output at the position holding 6 is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>6</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mn>4</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>5</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>6</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>11</mn></mrow></math>. Replaying from 6 loses 4 and
+5, giving <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>6</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>6</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>12</mn></mrow></math>. At the positions
+holding 7 and 8, the replay gives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>27</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math>
+and 15, instead of 13 and 15. These three outputs become the second layer’s KV rows. Its
+last query therefore reads different values even though all three positions are present:
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="text"><mtext>full: </mtext></mstyle><mn>15</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mfrac><mrow><mn>11</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>13</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>15</mn></mrow>
+<mrow><mn>3</mn></mrow></mfrac> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>28</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mstyle class="text"><mtext>replay: </mtext></mstyle><mn>15</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mfrac><mrow><mn>12</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>27</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>15</mn></mrow>
+<mrow><mn>3</mn></mrow></mfrac> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mn>57</mn></mrow>
+<mrow><mn>2</mn></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The first changed cache entry is in layer 2, at zero-based position 5. Recovering the raw
+entries recovered layer 1’s KV, but did not recover the representations needed by layer
+2.
+</p><p class="indent">   In the shared version, both layers read the original values 6, 7 and 8 for the last position. That
+position’s residual is also unchanged: it had its whole window in the preceding layer. Its final result is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>8</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>7</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>7</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>22</mn></mrow></math>. The
+retained shared KV is exact even though some earlier retained hidden rows are not. More
+generally, with shared KV, row-local operations and a replay that contains the last row’s window,
+the last row stays exact by induction over layers: its own previous representation and its visible
+shared KV are unchanged. This reasoning also permits queries that depend on that row’s previous
+representation. It does not permit cached KV that depends on other changed hidden
+rows.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="a-window-grows-backwards-across-layers"><span class="titlemark">9.1.1   </span> <a id="x1-1340009.1.1"></a>A window grows backwards across layers</h4>
+<p class="noindent">To recover three KV inputs at layer 2, first recover the three layer-1 outputs that produce them.
+Their combined input span contains five positions. Replaying inputs 4 through 8 therefore
+restores the retained KV and final output of our two-layer model exactly. The lab checks this
+equality with fractions.
+</p><p class="indent">   For a window of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math>
+entries at layer <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>D</mi></mrow></math>, each
+preceding layer adds <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>
+positions to the left. The current position is already included, so it must not be counted twice.
+The span is <a id="ref-eq:replay-span"></a></p><div class="equation-scroll" tabindex="0"><table class="equation"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="label" id="x1-134001r1"></mstyle><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>W</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mi>D</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-open" stretchy="false">(</mo><mi>W</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td><td class="eq-no">(9.1)</td></tr></table></div>
+<p class="indent">   For 20 layers with a 128-position window,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>541</mn></mrow></math>.
+The deployment Q&amp;A describes the conservative product
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>20</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>128</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>560</mn></mrow></math> <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+Both express the growth of SWA dependencies across layers; 2,541 is the tighter span under the
+inclusive causal-window convention.
+</p><p class="indent">   This counts input positions required by the local dependency chain, conditional on
+shared inputs and global KV already being available. It is not the sum of all layer-row
+computations. Those intervals can shrink as the computation moves upwards. Nor does it
+account for the work of producing the shared input. The lab checks these claims for
+windows 2 to 4 and one to three layers, on every 0/1 input two positions longer than
+the span: 5,456 cases. A shared-input replay of one window and a per-layer replay of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi></mrow></math> positions each
+reproduce the final row, the retained KV and one subsequent decode step. For every window and depth,
+replaying <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>
+positions changes the final row or the decode result for at least one input, so no shorter replay is
+exact for this rule. These are exact statements about the teaching rule, not about DeepInfer’s
+kernels.
+</p>
+<h3 class="sectionHead" id="where-deepinfer-puts-the-boundary"><span class="titlemark">9.2   </span> <a id="x1-1350009.2"></a>Where DeepInfer puts the boundary</h3>
+<p class="noindent">DeepInfer’s V4.1 path combines two sources of KV. Consumer layers project block KV from a
+shared representation produced at a boundary in the model. Their SWA KV instead comes from
+                                                                                  
+                                                                                  
+each layer’s own input. Thus the engine can preserve the source of block KV while shortening the
+consumer computation that builds local SWA state.
+</p><p class="indent">   The design draws on YOCO (<em>You Only Cache Once</em>). The terminology comes from three
+places: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-25"><colgroup id="TBL-25-1g"><col id="TBL-25-1"/><col id="TBL-25-2"/><col id="TBL-25-3"/></colgroup><tr id="TBL-25-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-25-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">YOCO
+paper</span> </p></td><td class="td11" id="TBL-25-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Model
+  report
+  and
+  Q&amp;A</span> </p></td><td class="td10" id="TBL-25-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepInfer
+  code</span> </p></td>
+</tr><tr id="TBL-25-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-25-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Self-decoder</span> </p></td><td class="td11" id="TBL-25-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Causal
+  encoder</span> </p></td><td class="td10" id="TBL-25-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Producer
+  work
+  before
+  </span><code>n_prefill_layer</code> </p></td>
+</tr><tr id="TBL-25-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-25-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Cross-decoder</span> </p></td><td class="td11" id="TBL-25-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Decoder</span> </p></td><td class="td10" id="TBL-25-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Consumer
+  layers,
+  starting
+  at
+  </span><code>n_prefill_layer</code> </p></td>
+</tr><tr id="TBL-25-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-25-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Shared
+global
+KV</span> </p></td><td class="td11" id="TBL-25-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Shared
+  encoder
+  representation</span> </p></td><td class="td10" id="TBL-25-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Boundary
+  normalisation;
+  </span><code>shared_hidden
+ </code><span class="ec-lmr-10">and
+  its
+  full-row
+  counterpart</span> </p></td>
+</tr><tr id="TBL-25-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-25-5-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   CED means <em>Causal Encoder-Decoder</em>. The model report explicitly credits YOCO as an
+inspiration. The YOCO paper’s cross-decoder reads a shared global KV cache and permits prefill
+to exit early without changing the final output. CED uses layer-dependent global-KV projections
+from shared hidden states and retains a separate per-layer SWA path. That local path requires
+reconstruction when decoder prefill is shortened <span class="cite">[<a href="references.html#Xyoco-paper">68</a>, <a href="references.html#Xdeepseek-v41">69</a>]</span>. The table maps roles; it does not make
+these architectures identical.
+</p><p class="indent">   Our concrete case is a long prompt with no prefix-cache hit, processed in one chunk. We
+explicitly enable <code>compact </code>mode. The producer layers process all prompt rows. At the boundary,
+two row layouts emerge (Figure <a href="chapter-09.html#ref-fig:replay-boundary">9.1</a>). We first follow those layouts, then examine how DeepInfer
+selects the retained positions.
+</p>
+<figure class="figure"><a id="ref-fig:replay-boundary"></a>
+<p class="noindent" id="-deepinfers-compact-prefill-has-two-row-layouts-full-shared-inputs-supply-block-kv-retained-inputs-continue-through-consumer-layers-the-boundary-layer-belongs-to-the-consumer-side-even-though-it-also-normalises-the-full-inputs-this-diagram-shows-dependencies-not-kernel-timing"><a aria-label="Open figure at full size" class="figure-image" href="webbook22x.svg" rel="noopener" target="_blank"><img alt="Figure 9.1: DeepInfer’s compact prefill has two row layouts. Full shared inputs supply
+block KV; retained inputs continue through consumer layers. The boundary layer belongs
+to the consumer side even though it also normalises the full inputs. This diagram shows
+dependencies, not kernel timing." loading="lazy" src="webbook22x.svg"/></a>
+<a id="x1-135001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 9.1: </span><span class="content">DeepInfer’s compact prefill has two row layouts. Full shared inputs supply
+block KV; retained inputs continue through consumer layers. The boundary layer belongs
+to the consumer side even though it also normalises the full inputs. This diagram shows
+dependencies, not kernel timing.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="one-layer-performs-two-jobs"><span class="titlemark">9.2.1   </span> <a id="x1-1360009.2.1"></a>One layer performs two jobs</h4>
+<p class="noindent">The Hugging Face adapter’s <code>_n_prefill_layer </code>returns the index of the first layer whose
+compression ratio is 1. Its docstring describes that layer as part of the prefill side. The runtime
+predicate includes the same index among consumers <span class="cite">[<a href="references.html#Xdeepinfer-hf-yoco">70</a>, <a href="references.html#Xdeepinfer-yoco-runtime">71</a>]</span>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.2.</b> The boundary index is also the first consumer index.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">def</span> <span class="nf">is_yoco_consumer_layer</span><span class="p">(</span><span class="n">cfg</span><span class="p">:</span> <span class="n">AttrDict</span><span class="p">,</span> <span class="n">layer_idx</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span><span class="w">    </span><span class="sd">"""YOCO consumer layer: [n_prefill_layer, n_layer) in the main model."""</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="k">return</span> <span class="n">yoco_enabled</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span> <span class="ow">and</span> <span class="n">cfg</span><span class="o">.</span><span class="n">n_prefill_layer</span> <span class="o">&lt;=</span> <span class="n">layer_idx</span> <span class="o">&lt;</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_hidden_layers</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/yoco.py#L19-L21">deepinfer/model_executor/models/v4_modules/yoco.py</a> · lines 19–21</div></div>
+<p class="indent">   The executed operations resolve the apparent disagreement. In <code>DeepseekModel.forward</code>, the
+boundary selects a consumer metadata view and retains the original metadata for full-source
+work:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.3.</b> Keep full metadata while switching the consumer’s view.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">196</span><span><span class="n">consumer_metadata</span> <span class="o">=</span> <span class="n">input_metadata</span><span class="o">.</span><span class="n">get_consumer_view</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">197</span><span><span class="n">cross_layer_runtime</span><span class="o">.</span><span class="n">consumer_full_metadata</span> <span class="o">=</span> <span class="n">input_metadata</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">198</span><span><span class="n">input_metadata</span> <span class="o">=</span> <span class="n">consumer_metadata</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py#L196-L198">deepinfer/model_executor/models/deepseek.py</a> · lines 196–198</div></div>
+<p class="indent">   At this point the hidden tensor still contains the original rows. The boundary layer makes
+compact copies of the hidden inputs and residuals, but normalises the full inputs as
+well:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.4.</b> Save a full normalised source, then continue with compact inputs.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">137</span><span>    <span class="n">compact_inputs</span><span class="p">,</span> <span class="n">full_inputs</span> <span class="o">=</span> <span class="n">compact_yoco_boundary</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">138</span><span>        <span class="n">hidden_states</span><span class="p">,</span> <span class="n">residual</span><span class="p">,</span> <span class="n">input_metadata</span><span class="p">,</span> <span class="n">cross_layer_runtime</span><span class="p">,</span> <span class="n">hc_enabled</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">hc_enabled</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">139</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">140</span><span>    <span class="n">cross_layer_runtime</span><span class="o">.</span><span class="n">consumer_full_hidden</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">attn_norm_forward</span><span class="p">(</span><span class="o">*</span><span class="n">full_inputs</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">141</span><span>    <span class="n">hidden_states</span><span class="p">,</span> <span class="n">residual</span> <span class="o">=</span> <span class="n">compact_inputs</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">142</span><span>    <span class="k">del</span> <span class="n">compact_inputs</span><span class="p">,</span> <span class="n">full_inputs</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">143</span><span><span class="n">hidden_states</span><span class="p">,</span> <span class="n">hidden_states_bf16</span><span class="p">,</span> <span class="n">residual</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">attn_norm_forward</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">,</span> <span class="n">residual</span><span class="p">,</span> <span class="n">hc_post_intervention</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/decoder_layer.py#L137-L143">deepinfer/model_executor/models/decoder_layer.py</a> · lines 137–143</div></div>
+<p class="indent"> <code>consumer_full_hidden </code>holds the full attention-normalised input. The normalisation on the
+last line supplies the compact input for this layer’s attention. A few lines later, the boundary
+saves the compact normalised copy as <code>shared_hidden</code>; the comment explicitly distinguishes it
+from the full copy (lines 147–152, author’s translation) <span class="cite">[<a href="references.html#Xdeepinfer-decoder">21</a>]</span>.
+</p><p class="indent">   The boundary therefore supplies full shared rows and runs consumer attention on compact
+rows. It is not a full producer attention layer followed by a separate first consumer layer.
+Counting it twice would misstate both the architecture and the saved computation. Its MLP also
+runs on the compact rows passed through attention.
+</p>
+<h4 class="subsectionHead" id="block-kv-keeps-its-full-source"><span class="titlemark">9.2.2   </span> <a id="x1-1370009.2.2"></a>Block KV keeps its full source</h4>
+<p class="noindent">Consumer layers that own block KV call <code>_store_yoco_full_kv</code>. This method reads
+<code>consumer_full_hidden </code>into a local variable named <code>full_hidden</code>. It checks the row count against
+<code>full_metadata</code>, then projects and stores the KV:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.5.</b> Project and store block KV from full shared rows.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">704</span><span><span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">shared_hidden_kv_proj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">705</span><span><span class="n">projected_kv</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">shared_hidden_kv_proj</span><span class="p">(</span><span class="n">full_hidden</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">706</span><span><span class="k">with</span> <span class="n">userbuffer</span><span class="o">.</span><span class="n">cp_session</span><span class="p">(</span><span class="n">enabled</span><span class="o">=</span><span class="n">use_cp</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">707</span><span>    <span class="n">wait_projected_kv</span> <span class="o">=</span> <span class="n">_make_cp_gather_getter</span><span class="p">(</span><span class="n">projected_kv</span><span class="p">,</span> <span class="n">use_cp</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">708</span><span>    <span class="n">pre_rope_kv</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_store_main_kv</span><span class="p">(</span><span class="n">wait_projected_kv</span><span class="p">,</span> <span class="n">kv_cache</span><span class="p">,</span> <span class="n">full_metadata</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">709</span><span><span class="n">cross_layer_runtime</span><span class="o">.</span><span class="n">pre_rope_kv</span> <span class="o">=</span> <span class="n">pre_rope_kv</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py#L704-L709">deepinfer/model_executor/models/v4_modules/attn.py</a> · lines 704–709</div></div>
+<p class="indent">   Both operations cover source positions excluded from consumer attention and MLP
+computation. Layers that reuse another layer’s block KV need not repeat that projection. In our
+no-hit case, truncation has not removed the inputs required to construct block KV. This is
+exactness of the dependency, not a claim that every kernel layout yields bitwise-identical
+arithmetic <span class="cite">[<a href="references.html#Xdeepinfer-attention">22</a>]</span>.
+</p><p class="indent">   There is a second kind of cross-layer sharing in the repository. <code>SharedLayerTopology </code>maps
+layers to sources for KV, index keys, selected indices and candidate blocks. These segmented
+maps are distinct from sharing the boundary representation. Its validation requires a
+KV source at the YOCO boundary: a share-KV segment cannot cross that boundary
+(<span class="path"><code>cross_layer.py</code></span>, lines 114–116). These maps govern reuse of computed entries between layers;
+the shared hidden path determines the input from which those entries are projected
+<span class="cite">[<a href="references.html#Xdeepinfer-cross-layer">72</a>]</span>.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="swa-keeps-a-perlayer-dependency"><span class="titlemark">9.2.3   </span> <a id="x1-1380009.2.3"></a>SWA keeps a per-layer dependency</h4>
+<p class="noindent">In the HF adapter, <code>yoco_swa_share_hidden </code>is false. The local KV therefore comes from the
+current hidden input. The method <code>_project_q_and_swa </code>selects that source alongside the query
+projection:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.6.</b> The SWA source is selected separately from the block-KV source.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">394</span><span><span class="n">q_a_kv_swa</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">q_a_kv_swa_proj</span><span class="p">(</span><span class="n">hidden_states</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">395</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_swa_share_hidden</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">396</span><span>    <span class="k">assert</span> <span class="n">shared_hidden_bf16</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"layer </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">layer_idx</span><span class="si">}</span><span class="s2">: yoco_swa_share_hidden requires shared_hidden_bf16"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">397</span><span>    <span class="k">return</span> <span class="n">q_a_kv_swa</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">kv_swa_proj</span><span class="p">(</span><span class="n">shared_hidden_bf16</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">398</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_swa</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">399</span><span>    <span class="k">return</span> <span class="n">q_a_kv_swa</span><span class="o">.</span><span class="n">split</span><span class="p">([</span><span class="bp">self</span><span class="o">.</span><span class="n">q_lora_rank</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">qk_head_dim</span><span class="p">],</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">400</span><span><span class="k">return</span> <span class="n">q_a_kv_swa</span><span class="p">,</span> <span class="kc">None</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py#L394-L400">deepinfer/model_executor/models/v4_modules/attn.py</a> · lines 394–400</div></div>
+<p class="indent">   With the flag false, <code>split </code>separates query and local KV components produced from
+<code>hidden_states</code>. With it true, a separate projection takes <code>shared_hidden_bf16</code>. These
+correspond to the two dependency choices in the opening experiment. In the inspected V4.1
+configuration, a consumer row near the retained region’s left edge loses SWA neighbours. Its
+changed output can become a later consumer’s KV input. Preserving full block KV does not
+repair that local dependency.
+</p><p class="indent">   The toy’s shared-input case explains why moving KV to a shared source can remove
+this particular dependency. It does not establish that enabling the flag would make
+DeepInfer’s whole computation exact: the rest of the model, indexing and numerical
+kernels would need their own checks. The engine we are reading uses the per-layer
+choice.
+</p>
+<h3 class="sectionHead" id="which-rows-can-a-consumer-see"><span class="titlemark">9.3   </span> <a id="x1-1390009.3"></a>Which rows can a consumer see?</h3>
+<p class="noindent">Let the prompt length be <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi></mrow></math>,
+the retained count <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi></mrow></math>,
+and the window <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math>. The
+retained region starts at <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>s</mi></mrow><mrow><mi mathvariant="italic">keep</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>K</mi></mrow></math>,
+clipped by the actual prompt extent. For our small diagram,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>12</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>.
+Full-source block KV still covers all 12 positions; consumer queries retain positions 8 through 11
+(Figure <a href="chapter-09.html#ref-fig:replay-rows">9.2</a>).
+</p>
+<figure class="figure"><a id="ref-fig:replay-rows"></a>
+<p class="noindent" id="-a-small-rowlayout-example-with-l-k-and-w-block-kv-still-has-its-full-source-the-first-retained-swa-queries-lose-neighbours-their-changed-outputs-can-become-later-layers-local-kv"><a aria-label="Open figure at full size" class="figure-image" href="webbook23x.svg" rel="noopener" target="_blank"><img alt="Figure 9.2: A small row-layout example with L = 12 , K = 4 and W = 3 .
+Block KV still has its full source. The first retained SWA queries lose neighbours; their
+changed outputs can become later layers’ local KV." loading="lazy" src="webbook23x.svg"/></a>
+<a id="x1-139001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 9.2: </span><span class="content">A small row-layout example with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>12</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>.
+Block KV still has its full source. The first retained SWA queries lose neighbours; their
+changed outputs can become later layers’ local KV.
+</span></figcaption>
+
+</figure>
+<h4 class="subsectionHead" id="compaction-changes-indices-not-positions"><span class="titlemark">9.3.1   </span> <a id="x1-1400009.3.1"></a>Compaction changes indices, not positions</h4>
+<p class="noindent">The C++ function <code>fill_yoco_truncation_metadata </code>prepares per-request clipping and compact
+query indices; <code>update_yoco_prompt_v4 </code>checks the keep count before calling it (lines 203 and
+349–359). In a chunk starting at <code>q_start </code>with <code>q_len </code>rows, <code>data_len </code>is the full sequence length
+used to locate the suffix:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.7.</b> Remove a chunk’s prefix, retaining at least one query row.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">225</span><span><span class="kt">int32_t</span><span class="w"> </span><span class="n">clip_prefix</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">compact</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">clamp</span><span class="p">(</span><span class="n">data_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">keep_tokens</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">q_start</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">q_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">226</span><span><span class="n">clip_prefixes</span><span class="p">[</span><span class="n">i_seq</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">clip_prefix</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">227</span><span><span class="n">full_bases</span><span class="p">[</span><span class="n">i_seq</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">full_base</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">228</span><span><span class="kt">int32_t</span><span class="w"> </span><span class="n">keep_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">q_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">clip_prefix</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">229</span><span><span class="n">p_cu_c</span><span class="p">[</span><span class="n">i_seq</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p_cu_c</span><span class="p">[</span><span class="n">i_seq</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">keep_len</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">230</span><span><span class="n">full_base</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">q_len</span><span class="p">;</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L225-L230">csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</a> · lines 225–230</div></div>
+<p class="indent">   For a single 12-row chunk, this removes eight rows and leaves four. For a four-row chunk
+covering positions 0–3 of that same prompt, it removes only three: the upper clamp is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>. The
+remaining position 3 is a placeholder, outside the final retained region. It keeps the chunk’s
+consumer computation nonempty; it is not another useful suffix token.
+</p><p class="indent">   The metadata view preserves original positions while replacing query-aligned arrays and
+counts:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.8.</b> Construct a compact view without changing original token positions.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">101</span><span><span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_compaction_enabled</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span><span class="n">view</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">103</span><span><span class="n">qi</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_query_indices</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">104</span><span><span class="n">view</span><span class="o">.</span><span class="n">total_q</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_total_q</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">105</span><span><span class="n">view</span><span class="o">.</span><span class="n">cu_seqlens_q</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_cu_seqlens_q</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">106</span><span><span class="n">view</span><span class="o">.</span><span class="n">positions</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_positions</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">107</span><span><span class="n">view</span><span class="o">.</span><span class="n">slot_mapping_store_swa</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_slot_mapping_store_swa</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">108</span><span><span class="n">view</span><span class="o">.</span><span class="n">ks</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_ks</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">109</span><span><span class="n">view</span><span class="o">.</span><span class="n">ke</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_ke</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">110</span><span><span class="n">view</span><span class="o">.</span><span class="n">kv_ca_index_offset_len</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">yoco_consumer_kv_ca_index_offset_len</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/input_metadata/yoco.py#L101-L110">deepinfer/model_executor/input_metadata/yoco.py</a> · lines 101–110</div></div>
+<p class="indent">   In the one-chunk example, compact row 0 represents original position 8. RoPE positions and
+ring slots must follow the latter. The view also replaces SWA pivots and clears derived attention
+fields so they can be regenerated for the new layout. It is a shallow copy: fields that were not
+replaced can still share tensors with the original metadata, and the docstring forbids modifying
+those shared tensors in place (author’s translation) <span class="cite">[<a href="references.html#Xdeepinfer-yoco-metadata">73</a>]</span>. With context parallelism, further code
+redistributes the retained rows across ranks; the source and consumer layouts still remain
+distinct.
+</p>
+<h4 class="subsectionHead" id="three-lower-bounds"><span class="titlemark">9.3.2   </span> <a id="x1-1410009.3.2"></a>Three lower bounds</h4>
+<p class="noindent">Keeping a row does not grant it access to every old cache entry. The decisive line in
+<code>yoco_swa_visibility </code>is:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.9.</b> Combine the window, retained-region and valid-state bounds.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">155</span><span><span class="kt">int32_t</span><span class="w"> </span><span class="n">abs_lo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">clamp</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">({</span><span class="n">pos</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">window_size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">rect_lo</span><span class="p">,</span><span class="w"> </span><span class="n">valid_start</span><span class="p">}),</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L155">csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</a> · line 155</div></div>
+<p class="indent"> <code>rect_lo </code>is the retained-region start; <code>valid_start </code>is the earliest valid state position. For a query at
+position <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math>,
+the lower bound is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>ℓ</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> clamp</mtext><mo> ⁡ </mo><mrow><mo class="MathClass-open" fence="true" mathsize="1.19em">(</mo><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>i</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>W</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>s</mi></mrow><mrow><mi mathvariant="italic">keep</mi></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>s</mi></mrow><mrow><mi mathvariant="italic">valid</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>i</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow><mo class="MathClass-close" fence="true" mathsize="1.19em">)</mo></mrow><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Visible positions run from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>ℓ</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+through <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math>.
+If <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>ℓ</mi></mrow><mrow><mi>i</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>i</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>,
+that interval is empty. The comment says that the valid-state bound prevents attention from
+reading zeroed slots (author’s translation, lines 151–154) <span class="cite">[<a href="references.html#Xdeepinfer-prefill-input">38</a>]</span>.
+</p><p class="indent">   For query 8 in the diagram, the usual window is 6–8 but the kept-region bound raises the start to
+8. Query 10 sees 8–10, a full three-position window. Its current layer has all three positions, yet their
+representations may already carry earlier truncation error. This is the distinction the lab exposed. The
+Q&amp;A’s <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>s</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>i</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>127</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+expresses the replay case with a 128-position window; the code also carries the valid-state bound
+and the empty-interval case.
+</p><p class="indent">   A placeholder must not overwrite live ring state. The slot assignment checks whether the
+position actually belongs to the retained region:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.10.</b> A placeholder has no SWA write destination.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">267</span><span><span class="kt">bool</span><span class="w"> </span><span class="n">in_rect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">data_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">keep_tokens</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">268</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">in_rect</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">q_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">swa_block_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">269</span><span><span class="w">    </span><span class="n">p_slot_c</span><span class="p">[</span><span class="n">i_qc</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">state_id</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">swa_block_size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">swa_block_size</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">270</span><span><span class="k">else</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">271</span><span><span class="w">    </span><span class="n">p_slot_c</span><span class="p">[</span><span class="n">i_qc</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L267-L271">csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</a> · lines 267–271</div></div>
+<p class="indent">   The extra length condition limits writes to the trailing ring capacity, as in chapter 5. The placeholder at
+position 3 receives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>;
+an ordinary retained row uses its original position modulo the ring size. Physical bytes left from
+older work do not override these validity rules.
+</p>
+<h4 class="subsectionHead" id="modes-defaults-and-limits"><span class="titlemark">9.3.3   </span> <a id="x1-1420009.3.3"></a>Modes, defaults and limits</h4>
+<p class="noindent"><code>off </code>keeps the ordinary prefill. <code>mask </code>retains all query rows but narrows consumer SWA visibility.
+<code>compact </code>uses that narrowed visibility and removes query rows, apart from placeholders. Mask
+therefore supplies a comparison for the compact layout. It removes no consumer rows; only its
+count of visible SWA pairs falls. The benchmark’s help text says that mask computes
+every consumer token and saves no work <span class="cite">[<a href="references.html#Xdeepinfer-benchmark">15</a>]</span>. Both enabled modes truncate the local
+dependency.
+</p><p class="indent">   The numbers governing this path have different jobs: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-27"><colgroup id="TBL-27-1g"><col id="TBL-27-1"/><col id="TBL-27-2"/></colgroup><tr id="TBL-27-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-1-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Number                                                                                                                        </span></td><td class="td10" id="TBL-27-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Meaning
+  and
+  evidence</span> </p> </td>
+</tr><tr id="TBL-27-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-2-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">128                                                                                                                               </span></td><td class="td10" id="TBL-27-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">SWA
+  window
+  for
+  the
+  V4.1
+  setting
+  in
+  the
+  Q&amp;A;
+  supplied
+  by
+  model
+  configuration</span> </p> </td>
+</tr><tr id="TBL-27-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-3-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">134                                                                                                                               </span></td><td class="td10" id="TBL-27-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Inference
+  ring:
+  window
+  plus
+  maximum
+  backtracking,</span>
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>128</mn><mo class="MathClass-bin" stretchy="false">+</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>5</mn><mo class="MathClass-bin" stretchy="false">+</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+<span class="ec-lmr-10">under
+  the
+  chapter
+  3
+  defaults</span> </p> </td>
+</tr><tr id="TBL-27-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-4-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">140                                                                                                                               </span></td><td class="td10" id="TBL-27-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">README’s
+  suggested
+  explicit
+  keep
+  count
+  for
+  V4.1</span> </p> </td>
+</tr><tr id="TBL-27-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-5-1" style="text-align:left; white-space:nowrap;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi> <mo class="MathClass-rel" stretchy="false">≥</mo><mn>134</mn></mrow></math> </td><td class="td10" id="TBL-27-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Runner
+  assertion
+  under
+  those
+  window/backtracking
+  settings</span> </p> </td>
+</tr><tr id="TBL-27-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-6-1" style="text-align:left; white-space:nowrap;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>134</mn></mrow></math> </td><td class="td10" id="TBL-27-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Production
+  prefix-hit
+  cap
+  in
+  the
+  Q&amp;A;
+  not
+  a
+  released
+  hit-policy
+  implementation</span> </p> </td>
+</tr><tr id="TBL-27-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-27-7-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">2,541 / 2,560                                                                                                                  </span></td><td class="td10" id="TBL-27-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Derived
+  SWA
+  dependency
+  span
+  /
+  Q&amp;A’s
+  conservative
+  product</span> </p> </td>
+</tr></table></div> </div>
+<p class="indent">   The Q&amp;A describes replaying 128 tokens; the README tells users to retain 140. These are
+not interchangeable defaults. <span class="path"><code>environ.py</code></span> defaults truncation to <code>off </code>and the keep count to zero.
+To enable it, users must supply a valid count. <code>ModelRunner.load_model </code>asserts that the count
+covers the window plus maximum backtracking. That assertion protects capacity after
+backtracking; it does not prove exact reconstruction <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-environ">30</a>, <a href="references.html#Xdeepinfer-graph">45</a>]</span>.
+</p><p class="indent">   Both enabled modes disable prompt log probabilities. The engine enforces this in
+<code>LLMEngine.add_request </code>by clearing <code>prompt_logprobs</code>: compact omits prompt rows, and mask
+changes their local context. Compact imposes two further restrictions when the YOCO path is
+enabled:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.11.</b> Compact consumer layouts constrain auxiliary model features.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">129</span><span><span class="k">if</span> <span class="n">dflash_target_layer_ids</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">130</span><span>    <span class="n">in_consumer</span> <span class="o">=</span> <span class="p">[</span><span class="n">t</span> <span class="o">&gt;=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">n_prefill_layer</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">dflash_target_layer_ids</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">131</span><span>    <span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="n">in_consumer</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span><span class="n">in_consumer</span><span class="p">),</span> <span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">132</span><span>        <span class="s2">"yoco consumer compaction requires DFlash target layers on the same side of "</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">133</span><span>        <span class="sa">f</span><span class="s2">"n_prefill_layer (</span><span class="si">{</span><span class="n">cfg</span><span class="o">.</span><span class="n">n_prefill_layer</span><span class="si">}</span><span class="s2">), got </span><span class="si">{</span><span class="n">dflash_target_layer_ids</span><span class="si">}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">134</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">135</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">dflash_targets_in_consumer</span> <span class="o">=</span> <span class="nb">all</span><span class="p">(</span><span class="n">in_consumer</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">136</span><span><span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="n">layer_id</span> <span class="o">&lt;</span> <span class="n">cfg</span><span class="o">.</span><span class="n">n_prefill_layer</span> <span class="k">for</span> <span class="n">layer_id</span> <span class="ow">in</span> <span class="n">engram_layer_ids</span><span class="p">),</span> <span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">137</span><span>    <span class="s2">"yoco consumer compaction does not support Engram in consumer layers yet."</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">138</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/deepseek.py#L129-L138">deepinfer/model_executor/models/deepseek.py</a> · lines 129–138</div></div>
+<p class="indent">   All DFlash target layers must fall on the same side of the boundary, so its collected features
+have a consistent row layout. Engram layers must remain before the consumer boundary.
+These two checks belong to compact mode; they are not blanket restrictions on mask
+<span class="cite">[<a href="references.html#Xdeepinfer-model">20</a>, <a href="references.html#Xdeepinfer-engine">5</a>]</span>.
+</p>
+<h3 class="sectionHead" id="which-state-may-enter-the-prefix-cache"><span class="titlemark">9.4   </span> <a id="x1-1430009.4"></a>Which state may enter the prefix cache?</h3>
+<p class="noindent">Chapter 4 divided a <code>StateBlock </code>into stored and dropped regions. We can now explain the
+consumer SWA part of that division. In <span class="path"><code>worker/cache_engine.py</code></span>, <code>_is_dropped_swa_layer</code>
+returns true for layers at or beyond <code>n_prefill_layer</code>, provided the model has a consumer region.
+It does not inspect the truncation mode. The counts use that predicate:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.12.</b> Partition SWA state according to the model boundary.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">265</span><span><span class="bp">self</span><span class="o">.</span><span class="n">swa_num_layer</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">GPUCacheInterface</span><span class="o">.</span><span class="n">_has_SWA</span><span class="p">(</span><span class="n">attn_module</span><span class="p">))</span> <span class="k">for</span> <span class="n">attn_module</span> <span class="ow">in</span> <span class="n">runtime_attn_modules</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span><span class="bp">self</span><span class="o">.</span><span class="n">swa_store_num_layer</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">267</span><span>    <span class="nb">int</span><span class="p">(</span><span class="n">GPUCacheInterface</span><span class="o">.</span><span class="n">_has_SWA</span><span class="p">(</span><span class="n">attn_module</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">268</span><span>    <span class="k">for</span> <span class="n">layer_id</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">attn_module</span> <span class="ow">in</span> <span class="n">iter_runtime_attn_modules</span><span class="p">(</span><span class="n">attn_module_list</span><span class="p">,</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_hidden_layers</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">269</span><span>    <span class="k">if</span> <span class="ow">not</span> <span class="n">_is_dropped_swa_layer</span><span class="p">(</span><span class="n">cfg</span><span class="p">,</span> <span class="n">layer_id</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">270</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">271</span><span><span class="bp">self</span><span class="o">.</span><span class="n">swa_drop_num_layer</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">swa_num_layer</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">swa_store_num_layer</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">272</span><span><span class="bp">self</span><span class="o">.</span><span class="n">swa_block_size_kvstore</span> <span class="o">=</span> <span class="n">get_kvstore_swa_block_size</span><span class="p">(</span><span class="n">window_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">273</span><span><span class="bp">self</span><span class="o">.</span><span class="n">swa_block_size_inference</span> <span class="o">=</span> <span class="n">get_inference_swa_block_size</span><span class="p">(</span><span class="n">window_size</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L265-L273">deepinfer/worker/cache_engine.py</a> · lines 265–273</div></div>
+<p class="indent">   Later, <code>state_size_to_disk </code>is assigned only the stored SWA region’s inference-layout byte
+count. Consumer SWA remains in the dropped region alongside compression state. The transfer
+from the prefill engine to the decode engine (PE to CE in the docstring and Q&amp;A) includes that
+region, because decode needs it. “Dropped” thus means excluded from prefix persistence, not
+released at the end of prefill <span class="cite">[<a href="references.html#Xdeepinfer-cache">23</a>]</span>.
+</p><p class="indent">   This policy makes the next prefill rebuild consumer SWA instead of retrieving it. With
+truncation enabled, that reconstruction is approximate. With it off, consumer computation is full
+only when nothing is restored. <code>load_state_from_store_to_prefill_cache </code>copies stored state
+into a prefill slot after a hit. Its first statement asserts that truncation is not <code>off </code>whenever the
+model has dropped SWA layers (lines 836–837). A hit without truncation would need consumer
+SWA for positions before the hit, and nothing stored supplies it. The release therefore ties
+restored prefix state to truncated consumer replay, although the cache partition itself is the same
+in either mode <span class="cite">[<a href="references.html#Xdeepinfer-cache">23</a>]</span>.
+</p><p class="indent">   The Q&amp;A identifies the first 20 layers as the stored V4.1 layers, and the model report gives 20
+encoder and 20 decoder layers. These counts are documented model settings, not numbers implied
+by the generic predicate <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>, <a href="references.html#Xdeepseek-v41">69</a>]</span>.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="the-other-bounded-replay"><span class="titlemark">9.4.1   </span> <a id="x1-1440009.4.1"></a>The other bounded replay</h4>
+<p class="noindent">The deployment Q&amp;A uses <em>bounded replay </em>for two operations. Our source path so far is the
+decoder operation: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-30"><colgroup id="TBL-30-1g"><col id="TBL-30-1"/><col id="TBL-30-2"/><col id="TBL-30-3"/></colgroup><tr id="TBL-30-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-30-1-1" style="text-align:left; white-space:nowrap;"> </td><td class="td11" id="TBL-30-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Decoder
+  replay</span> </p></td><td class="td10" id="TBL-30-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Encoder
+  replay</span> </p></td>
+</tr><tr id="TBL-30-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-30-2-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Trigger    </span></td><td class="td11" id="TBL-30-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Prefill
+  with
+  truncation
+  enabled</span> </p></td><td class="td10" id="TBL-30-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Block-KV
+  cache
+  hit
+  without
+  usable
+  SWA</span> </p></td>
+</tr><tr id="TBL-30-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-30-3-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Work      </span></td><td class="td11" id="TBL-30-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Rebuild
+  consumer
+  SWA
+  over
+  a
+  bounded
+  suffix</span> </p></td><td class="td10" id="TBL-30-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Replay
+  the
+  hit
+  prefix’s
+  last
+  block,
+  then
+  process
+  the
+  uncached
+  suffix</span> </p></td>
+</tr><tr id="TBL-30-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-30-4-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Evidence  </span></td><td class="td11" id="TBL-30-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Released
+  prefill
+  and
+  consumer
+  code</span> </p></td><td class="td10" id="TBL-30-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Q&amp;A’s
+  production
+  design;
+  released
+  hooks
+  without
+  the
+  driving
+  hit
+  policy</span> </p></td>
+</tr></table></div> </div>
+<p class="indent">   For encoder recovery, the Q&amp;A describes reusing the replayed prefix’s block KV without
+recomputing or overwriting it. Only its SWA is rebuilt; the uncached suffix produces both kinds
+of KV. The production cache manager chooses a block-aligned hit and backs off one block when
+qualifying SWA state is missing. That cache-management implementation is outside the release
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   The released hooks support parts of such a path, but do not drive it. <code>swa_valid_start </code>is
+initialised or reset to zero in <code>KvCacheState</code>; it has a binding, but the inspected Python code
+contains no writer. The scheduler reserves and clears <code>zero_states </code>without filling it. It stores
+<code>truncate_len </code>without reading it. Following those names alone would therefore not reconstruct
+the production hit-recovery algorithm <span class="cite">[<a href="references.html#Xdeepinfer-sequence">6</a>, <a href="references.html#Xdeepinfer-scheduler">8</a>]</span>.
+</p><p class="indent">   The documented hit cap also leaves an integration question. Capping a hit at
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>134</mn></mrow></math> guarantees
+                                                                                  
+                                                                                  
+at least 134 uncached rows. Those rows could supply the shared hidden inputs needed by decoder
+replay; that connection is an inference about the unreleased driver. An aligned hit exactly at the cap
+leaves 134 rows, not the README’s 140. The released metadata code makes the gap concrete.
+With <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>q</mi></mrow><mrow><mi mathvariant="italic">start</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>134</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>s</mi></mrow><mrow><mi mathvariant="italic">keep</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>140</mn></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>128</mn></mrow></math>, the first query’s
+lower bound is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>140</mn></mrow></math>
+unless <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>s</mi></mrow><mrow><mi mathvariant="italic">valid</mi></mrow></msub></mrow></math>
+is raised. Its visibility therefore includes six consumer ring entries from before the hit
+(<code>start_slot </code>is 122). Restoring a hit writes only the stored region, so nothing in the release fills
+those entries. This is our reading of the metadata code; we have not executed it. Block alignment
+and an SWA miss can lengthen the suffix, but neither supplies a universal answer for the
+exact-cap case. The release does not establish how that service policy and the suggested keep
+setting are combined. Chapter 11 will discuss the documented policy with this limit
+intact.
+</p>
+<h3 class="sectionHead" id="count-the-saving-choose-the-error-baseline"><span class="titlemark">9.5   </span> <a id="x1-1450009.5"></a>Count the saving; choose the error baseline</h3>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/20_replay_cost.py
+</code></pre></div>
+<p class="indent">   The second lab translates DeepInfer’s query-range and SWA pair-count formulas into standard-library
+Python. It checks them against a reference that enumerates every visible query-key pair. The first
+examples use <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>window=3, keep=4; entries are consumer rows / SWA pairs
+case           off       mask     compact
+short         2/ 3    2/ 3    2/ 3
+long         12/33   12/ 9    4/ 9
+clipped       4/ 9    4/ 0    1/ 0
+crossing      4/12    4/ 3    2/ 3
+valid-start   2/ 3    2/ 3    2/ 3
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/20_replay_cost.txt">results/20_replay_cost.txt</a></div></div>
+<p class="indent">   The long case covers all 12 prompt positions. Full SWA has
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>10</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>3</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>33</mn></mrow></math> pairs. Truncating
+visibility leaves <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>3</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>3</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>9</mn></mrow></math>
+pairs in either enabled mode. Mask still executes 12 query rows; compact executes four. In the
+clipped case, the chunk covers positions 0–3. Compact executes its one placeholder with no visible
+SWA keys. The crossing case covers positions 6–9: only 8 and 9 remain useful, with one and two
+visible keys respectively. The valid-start case begins at 10 and excludes all earlier state; its two
+queries have one and two keys even with truncation off. These cases separate row counts from
+attention-pair counts.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="the-estimator-knows-about-placeholders"><span class="titlemark">9.5.1   </span> <a id="x1-1460009.5.1"></a>The estimator knows about placeholders</h4>
+<p class="noindent"><code>FlopsEstimator::query_ranges </code>starts with the full query interval
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>k</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>q</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>k</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. Its
+consumer adjustment follows the same chunk rule as the metadata builder:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 9.13.</b> Count consumer queries and visible SWA pairs after truncation.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">267</span><span><span class="n">QueryRange</span><span class="w"> </span><span class="n">consumer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">full</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">268</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_prompt</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">compact</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">has_truncated_swa</span><span class="p">))</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">269</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">cutoff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">full_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">keep_tokens</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">270</span><span><span class="w">    </span><span class="c1">// A fully clipped compact chunk still executes its last query row.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">271</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">compact</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">272</span><span><span class="w">        </span><span class="n">consumer</span><span class="p">.</span><span class="n">begin</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">clamp</span><span class="p">(</span><span class="n">cutoff</span><span class="p">,</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">273</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">swa_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">swa_valid_start</span><span class="p">,</span><span class="w"> </span><span class="n">cutoff</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">274</span><span><span class="w">    </span><span class="n">consumer</span><span class="p">.</span><span class="n">swa_pairs</span><span class="w"> </span><span class="o">=</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">275</span><span><span class="w">        </span><span class="n">window_size</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">pairs</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">consumer</span><span class="p">.</span><span class="n">begin</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">swa_start</span><span class="p">),</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">k</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">swa_start</span><span class="p">),</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">window_size</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">276</span><span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">277</span><span><span class="k">return</span><span class="w"> </span><span class="p">{</span><span class="n">full</span><span class="p">,</span><span class="w"> </span><span class="n">consumer</span><span class="p">};</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/flops_estimator.hpp#L267-L277">csrc/engine/flops_estimator.hpp</a> · lines 267–277</div></div>
+<p class="indent"> <code>pairs </code>uses a prefix sum. For a window <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>W</mi></mrow></math>,
+the cumulative pair count through <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>n</mi></mrow></math>
+positions is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>S</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>n</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi>m</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>m</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mn>2</mn></mrow></mfrac> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mi>n</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>m</mi><mo class="MathClass-close" stretchy="false">)</mo><mi>W</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>m</mi> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>n</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>W</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Subtracting two prefix counts gives an interval’s work. Subtracting <code>swa_start </code>first expresses
+the interval relative to its valid local source; clamping to zero handles queries before that source.
+The lab compares these formulas with direct key enumeration on 8,910 cases, including short
+sequences, chunk boundaries and nonzero valid starts.
+</p><p class="indent">   A 1,024-position prompt processed in four 256-position chunks illustrates why keep count alone is
+insufficient. With <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>140</mn></mrow></math>,
+the first three chunks each execute one placeholder consumer row and the last executes 140. The
+total is 143, whereas one full chunk executes 140 consumer rows. The source estimator counts the
+extra rows even though they have no visible SWA keys.
+</p>
+<h4 class="subsectionHead" id="why-the-saving-can-approach-one-half"><span class="titlemark">9.5.2   </span> <a id="x1-1470009.5.2"></a>Why the saving can approach one half</h4>
+<p class="noindent">Ignore differences in layer cost for a moment. For
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math> producer
+layers, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>D</mi></mrow></math>
+consumer layers and one prefill chunk, the ratio of retained layer-row work to full layer-row work
+is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mfrac><mrow><mi mathvariant="italic">PL</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>D</mi><mtext class="qopname">min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>L</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>K</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mo class="MathClass-open" stretchy="false">(</mo><mi>P</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>D</mi><mo class="MathClass-close" stretchy="false">)</mo><mi>L</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   V4.1 has equal halves: the model report gives 20 encoder and 20 decoder layers <span class="cite">[<a href="references.html#Xdeepseek-v41">69</a>]</span>. With
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>D</mi></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi></mrow></math> much larger
+than <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>K</mi></mrow></math>,
+the ratio approaches one half. The lab’s illustrative equal-cost calculation gives:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Equal layer costs, 20 producer + 20 consumer layers, keep=140
+length    full row-work    compact row-work    ratio
+    64             2560                2560   1.0000
+  1024            40960               23280   0.5684
+ 16384           655360              330480   0.5043
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/20_replay_cost.txt">results/20_replay_cost.txt</a></div></div>
+<p class="indent">   At length 64 there is nothing to remove. At 1,024, the ratio is about 0.5684; at 16,384 it is
+about 0.5043. This explains the scale of the Q&amp;A’s “nearly halving” claim, rather than
+reproducing a model-specific FLOP count.
+</p><p class="indent">   DeepInfer’s actual estimator retains work that the row proxy omits. <code>calc_kproj_flops </code>takes
+the full query range for block-KV projections. <code>calc_attn_flops </code>combines full and consumer row
+terms, SWA pair terms, and global-attention pair terms. The boundary normalisation-related
+contractions also retain full-row work. <code>calc_non_attn_flops </code>weights producer and consumer
+rows using their own coefficients. Chapter 2’s FP8-equivalent accounting still applies; these counts
+do not turn directly into execution time <span class="cite">[<a href="references.html#Xdeepinfer-flops">14</a>]</span>.
+</p><p class="indent">   The repository’s <span class="path"><code>tests/engine/test_flops_estimator.py</code></span> compares the native estimator
+with per-layer, per-query accounting, including off, mask, compact and chunk cases. It requires
+model metadata and the compiled extension. Our lab checks the translated range and pair
+formulas, not that native test or the full model’s cost <span class="cite">[<a href="references.html#Xdeepinfer-replay-cost-tests">74</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="equivalence-needs-the-right-comparison"><span class="titlemark">9.5.3   </span> <a id="x1-1480009.5.3"></a>Equivalence needs the right comparison</h4>
+<p class="noindent">The opening experiment compares shortened computation with full computation. The released
+YOCO checks ask a different question: does compact match mask? Their L1 check compares
+metadata, visible keys and slots. L2 compares model log probabilities and top-token
+results along a fixed teacher-forced trajectory. Both modes use truncated SWA, so
+agreement between them cannot establish that truncation preserves the full model
+<span class="cite">[<a href="references.html#Xdeepinfer-yoco-checks">75</a>]</span>.
+</p><p class="indent">   The script also supports an untruncated baseline by setting <code>keep_tokens=0</code>; it then
+selects <code>off</code>. The capability to produce a baseline is not a published error measurement.
+No full-versus-truncated error measurement was found in the inspected release. The
+model report states that the reconstructed decoder SWA KV is not mathematically
+equivalent to a full decoder pass. It reports a negligible effect on response quality, and
+simulates the same replay during post-training <span class="cite">[<a href="references.html#Xdeepseek-v41">69</a>]</span>. These are the authors’ findings, not
+an error bound reproduced here. The last point means the approximation is partly a
+model property: post-training adapted the model to it, so it is not only an engine
+shortcut.
+                                                                                  
+                                                                                  
+</p><p class="indent">   An evaluation of the approximation would hold inputs and the continuation trajectory fixed,
+then compare full and truncated intermediate state and log probabilities. A separate task
+evaluation would ask whether those differences matter to answers. Exact state equality, numerical
+agreement, and acceptable model quality are three different claims. Chapter 10 returns to the
+contracts checked by the released equivalence tests.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next8"><span class="titlemark">9.6   </span> <a id="x1-1490009.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-149002x1">Use  equation <a href="chapter-09.html#ref-eq:replay-span">(9.1)</a>  for  four  layers  and  a  five-position  window.  List  the  intervals
+     required  at  each  layer  to  recover  the  final  window.  Which  number  counts  input
+     positions, and which counts layer-row computations?
+     </li>
+<li class="enumerate" id="x1-149004x2">In lab 19, retain four inputs instead of three or five. Find the first differing second-layer
+     cache entry. Is the final prefill result exact? Check one subsequent decode step as well.
+     </li>
+<li class="enumerate" id="x1-149006x3">A prompt has 12 positions, keep count four and window three. For a chunk covering
+     positions 4–7, find the compact query, its SWA visibility and its write slot. Explain
+     why a query can execute without updating the ring.
+     </li>
+<li class="enumerate" id="x1-149008x4">Switch truncation from compact to off. Does <code>_is_dropped_swa_layer </code>move consumer
+     SWA into the stored region? Trace where that state is still needed before it can be
+     released. Then follow a prefix hit into <code>load_state_from_store_to_prefill_cache</code>.
+     Why must it refuse to run?
+     </li>
+<li class="enumerate" id="x1-149010x5">A block-aligned hit leaves 134 uncached rows. Which part of a 140-row retained suffix
+     lies before the hit? Identify the released evidence and the missing service behaviour
+     needed to say how those rows are supplied.
+     </li>
+<li class="enumerate" id="x1-149012x6">Mask and compact produce identical log probabilities. State what this establishes and
+     propose a different comparison for the approximation error.</li></ol>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-08.html"><small>PREVIOUS</small>← Spend verification work wisely</a><a class="next" href="chapter-10.html"><small>NEXT</small>Different correctness contracts →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#where-exact-window-recovery-stops">9.1 Where exact window recovery stops</a><a class="toc-sub" href="#a-window-grows-backwards-across-layers">9.1.1 A window grows backwards across layers</a><a class="" href="#where-deepinfer-puts-the-boundary">9.2 Where DeepInfer puts the boundary</a><a class="toc-sub" href="#one-layer-performs-two-jobs">9.2.1 One layer performs two jobs</a><a class="toc-sub" href="#block-kv-keeps-its-full-source">9.2.2 Block KV keeps its full source</a><a class="toc-sub" href="#swa-keeps-a-perlayer-dependency">9.2.3 SWA keeps a per-layer dependency</a><a class="" href="#which-rows-can-a-consumer-see">9.3 Which rows can a consumer see?</a><a class="toc-sub" href="#compaction-changes-indices-not-positions">9.3.1 Compaction changes indices, not positions</a><a class="toc-sub" href="#three-lower-bounds">9.3.2 Three lower bounds</a><a class="toc-sub" href="#modes-defaults-and-limits">9.3.3 Modes, defaults and limits</a><a class="" href="#which-state-may-enter-the-prefix-cache">9.4 Which state may enter the prefix cache?</a><a class="toc-sub" href="#the-other-bounded-replay">9.4.1 The other bounded replay</a><a class="" href="#count-the-saving-choose-the-error-baseline">9.5 Count the saving; choose the error baseline</a><a class="toc-sub" href="#the-estimator-knows-about-placeholders">9.5.1 The estimator knows about placeholders</a><a class="toc-sub" href="#why-the-saving-can-approach-one-half">9.5.2 Why the saving can approach one half</a><a class="toc-sub" href="#equivalence-needs-the-right-comparison">9.5.3 Equivalence needs the right comparison</a><a class="" href="#experiments-to-try-next8">9.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

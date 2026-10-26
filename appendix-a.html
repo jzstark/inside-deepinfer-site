@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compression and indexing · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link active" href="appendix-a.html" aria-current="page"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">APPENDIX A</p><h1 class="appendixHead" id="compression-and-indexing"><a id="x1-185000A"></a>Compression and indexing</h1>
+<p class="noindent"><a id="ref-app:compression"></a>
+</p><p class="indent">   Chapter 3 followed a sliding window into attention; chapter 4 allocated blocks without
+explaining their compressed rows. Here we follow the other read path: completed compressed KV,
+a smaller index used to select rows, and the temporary state needed to produce the next
+row.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-14">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">If two token positions produce one compressed row, what happens when a prefill
+chunk ends after the first token? Can a later six-position verification step write all
+its inputs into a two-entry compression ring? </p>
+</div>
+</div>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/26_compression.py
+</code></pre></div>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>C2 rows (before BF16/norm/RoPE): [('6', '8'), ('8', '3'), ('3', '5')]
+Chunks [0,1), [1,4), [4,7): valid/reserved rows [(0, 1), (2, 2), (1, 1)]
+Pending token positions: [6]
+Six-position decode: ring 7 preserves every completed pair
+Ring 6 corrupts first pair: ('42/5', '8')
+Checks: 64 chunk partitions agree exactly; undersized ring fails
+Default C2 state payload: 7 * 2 * 512 * 4 = 28672 bytes
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/26_compression.txt">results/26_compression.txt</a></div></div>
+<p class="indent">   Seven inputs produce three completed pairs and one pending input. Splitting the inputs into
+chunks of lengths 1, 3 and 3 does not change those pairs. A six-entry ring, however, lets the last
+new write overwrite the first pair’s old input. Seven entries preserve it. Compression reduces the
+completed cache; it still needs live state between steps.
+</p><p class="indent"> <strong>Scope and order. </strong>We first explain the gated mean and its boundaries, then follow
+<code>V4Attention </code>through the compressor and indexer to the final attention read. A second
+experiment separates scoring, candidate restriction and address conversion. Finally, we account
+for bytes and distinguish the objects shared across layers. The case is a sparse C2 layer that owns
+its main KV and index-K, without YOCO compaction or CP sharding; later sections identify
+where those other paths differ.
+</p>
+<h3 class="sectionHead" id="a-pair-is-complete-only-at-its-boundary"><span class="titlemark">A.1   </span> <a id="x1-186000A.1"></a>A pair is complete only at its boundary</h3>
+<p class="noindent">There are two kinds of compression in this discussion. MLA compresses a <em>feature vector</em>, as
+chapter 3 explained. C2 combines <em>two token positions </em>into one row. It does not halve the number
+of channels in that row. C1 keeps one row per position. The released <code>Compressor </code>accepts
+only ratios 1 and 2 and rejects the optional <code>compress_overlap </code>and <code>use_ape </code>settings
+<span class="cite">[<a href="references.html#Xdeepinfer-compressor">87</a>]</span>.
+</p><p class="indent">   For latent component <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>d</mi></mrow></math>, the
+C2 operation over positions <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mi>j</mi><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mi>j</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>z</mi></mrow><mrow><mi>j</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo><munderover accent="false" accentunder="false"><mrow><mo> ∑</mo>
+</mrow><mrow><mi>t</mi><mo class="MathClass-rel" stretchy="false">=</mo><mn>2</mn><mi>j</mi></mrow><mrow><mn>2</mn><mi>j</mi><mo class="MathClass-bin" stretchy="false">+</mo><mn>1</mn></mrow></munderover> <mfrac><mrow><mtext class="qopname"> exp</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><msub><mrow><mi>s</mi></mrow><mrow><mi>t</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mtext class="qopname">exp</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><msub><mrow><mi>s</mi></mrow><mrow><mn>2</mn><mi>j</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">+</mo><mtext class="qopname"> exp</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><msub><mrow><mi>s</mi></mrow><mrow><mn>2</mn><mi>j</mi><mo class="MathClass-bin" stretchy="false">+</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo></mrow></mfrac><mspace class="thinspace" width="0.17em"></mspace><msub><mrow><mi>v</mi></mrow><mrow><mi>t</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi></mrow></msub><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The score <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math> is
+a learned gate; <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>v</mi></mrow></math>
+is the projected latent. Each channel has its own weights over the two positions. This is not
+attention over the whole context, nor an unweighted average. In <span class="path"><code>v4_modules/mla_attn.py</code></span>,
+<code>SoftmaxAPEGatedColumnParallelLora </code>constructs an A projection for values and a Gate
+projection for scores. Its name retains APE, although the runtime rejects that option. The
+single-position C1 softmax is one, so C1 needs no Gate <span class="cite">[<a href="references.html#Xdeepinfer-compressor">87</a>]</span>.
+</p><p class="indent">   The first lab pair has values <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>10</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. It substitutes
+positive integer weights <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> for the exponentials.
+The result is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>6</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>8</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>:
+the second token dominates channel zero, while the first dominates channel one. Fractions let us
+check this mathematical operation exactly. They do not reproduce floating-point exponentials or
+BF16 rounding.
+</p><p class="indent">   The lab implements that mean with rational weights:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.1.</b> A per-channel weighted mean before rounding.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">18</span><span><span class="k">def</span> <span class="nf">compress</span><span class="p">(</span><span class="n">rows</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">sum</span><span class="p">(</span><span class="n">F</span><span class="p">(</span><span class="n">w</span><span class="p">[</span><span class="n">d</span><span class="p">])</span> <span class="o">*</span> <span class="n">v</span><span class="p">[</span><span class="n">d</span><span class="p">]</span> <span class="k">for</span> <span class="n">w</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>                 <span class="o">/</span> <span class="nb">sum</span><span class="p">(</span><span class="n">w</span><span class="p">[</span><span class="n">d</span><span class="p">]</span> <span class="k">for</span> <span class="n">w</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">)</span> <span class="k">for</span> <span class="n">d</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/26_compression.py">labs/26_compression.py</a> · lines 18–20</div></div>
+<p class="indent">   The source reference reduces over positions, then casts the result:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.2.</b> A softmax over positions for each latent channel.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">199</span><span><span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">latent_slice</span> <span class="o">*</span> <span class="n">score_slice</span><span class="o">.</span><span class="n">softmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">200</span><span><span class="n">kv_compressed</span><span class="p">[</span><span class="n">compressed_start</span> <span class="o">+</span> <span class="n">blk_id</span> <span class="o">-</span> <span class="n">qstart</span> <span class="o">//</span> <span class="n">compress_ratio</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compress.py#L199-L200">deepinfer/model_executor/layers/tilelang_ops/compress.py</a> · lines 199–200</div></div>
+<p class="indent">   The production wrapper makes the C1/C2 distinction explicit:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.3.</b> C1 bypasses temporal compression; C2 separates scores and values.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">89</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">kv_compress_ratio</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">90</span><span>    <span class="k">assert</span> <span class="n">projected_kv</span><span class="o">.</span><span class="n">dtype</span> <span class="o">==</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span> <span class="ow">and</span> <span class="n">state_cache</span> <span class="ow">is</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">91</span><span>    <span class="k">if</span> <span class="n">input_metadata</span><span class="o">.</span><span class="n">mirror_cp_reverse_index</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">92</span><span>        <span class="n">projected_kv</span> <span class="o">=</span> <span class="n">gather</span><span class="p">(</span><span class="n">projected_kv</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span> <span class="n">input_metadata</span><span class="o">.</span><span class="n">mirror_cp_reverse_index</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">93</span><span>    <span class="k">return</span> <span class="n">projected_kv</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">94</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">95</span><span><span class="k">assert</span> <span class="n">projected_kv</span><span class="o">.</span><span class="n">dtype</span> <span class="o">==</span> <span class="n">torch</span><span class="o">.</span><span class="n">float32</span> <span class="ow">and</span> <span class="n">state_cache</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">96</span><span><span class="n">score</span><span class="p">,</span> <span class="n">latent</span> <span class="o">=</span> <span class="n">projected_kv</span><span class="o">.</span><span class="n">chunk</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/compress.py#L89-L96">deepinfer/model_executor/models/v4_modules/compress.py</a> · lines 89–96</div></div>
+<p class="indent">   C1 receives BF16 and no compression state. Its optional gather restores CP’s input ordering.
+C2 receives FP32 score/latent pairs and requires state. The following branch calls the prefill or
+decode helper with the same ratio. These helpers return BF16 rows before the compressor’s
+normalisation and RoPE.
+</p>
+<h4 class="subsectionHead" id="chunk-boundaries-and-placeholder-rows"><span class="titlemark">A.1.1   </span> <a id="x1-187000A.1.1"></a>Chunk boundaries and placeholder rows</h4>
+<p class="noindent">Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math> be the first new token
+position and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>e</mi></mrow></math> the exclusive
+end of a chunk. For ratio <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi></mrow></math>,
+the number of newly completed rows is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>n</mi></mrow><mrow><mi>c</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mo class="MathClass-open" stretchy="false">⌊</mo><mi>e</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>r</mi><mo class="MathClass-close" stretchy="false">⌋</mo><mo class="MathClass-bin" stretchy="false">−</mo><mo class="MathClass-open" stretchy="false">⌊</mo><mi>s</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>r</mi><mo class="MathClass-close" stretchy="false">⌋</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The prefill reference iterates exactly those compressed indices. If a pair began before
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi></mrow></math>, it
+reads that input from the state ring; otherwise it reads from the current projection. It
+subsequently retains recent score/latent pairs in the ring for later chunks <span class="cite">[<a href="references.html#Xdeepinfer-compress-reference">88</a>]</span>.
+</p><p class="indent">   For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, no pair
+is complete. For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>,
+pairs <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> finish: position zero must
+survive the first chunk. For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>7</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>,
+only <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>5</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+finishes. Position six remains pending. Lab 26 tries every choice of cuts between the seven
+inputs and compares the completed rows and pending suffix with processing the whole
+sequence.
+</p><p class="indent">   Physical output shape is not the valid-row count. The prefill metadata reserves
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>n</mi></mrow><mrow><mi>c</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> rows per request, even
+when <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>n</mi></mrow><mrow><mi>c</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0</mn></mrow></math>. Its placeholder has
+position zero and store slot <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>;
+the reference compression output is zero-filled there. Decode instead reserves one output row per
+query position, with zero output and no valid store slot for a position that does not complete a
+group. The C++ builder implements these conventions in <span class="path"><code>prepare_tensor_input_v4.cpp</code></span>:46–91.
+A placeholder is not an extra cached token <span class="cite">[<a href="references.html#Xdeepinfer-compressed-metadata">89</a>]</span>.
+</p>
+<h3 class="sectionHead" id="temporary-state-must-survive-speculative-writes"><span class="titlemark">A.2   </span> <a id="x1-188000A.2"></a>Temporary state must survive speculative writes</h3>
+<p class="noindent">A C2 cache row cannot replace the score and latent of an incomplete pair. The live <code>ca_state</code>
+stores both, in FP32, with shape </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mo class="MathClass-open" stretchy="false">[</mo><mstyle class="text"><mtext>state slots</mtext></mstyle><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="nbsp" width="0.33em"></mspace><mi>S</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="nbsp" width="0.33em"></mspace><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="nbsp" width="0.33em"></mspace><mstyle class="text"><mtext>latent dimension</mtext></mstyle><mo class="MathClass-close" stretchy="false">]</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The axis of length two is score versus latent, not K versus V. <code>ca_cache </code>holds completed
+compressed KV in paged blocks. Their lifetimes and byte formats differ.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The decode reference writes every new position before computing completed rows. Its
+assertion states the required capacity:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.4.</b> Write all inputs, then find positions that finish a group.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">223</span><span><span class="n">compress_token</span> <span class="o">=</span> <span class="n">compress_ratio</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">224</span><span><span class="n">state_cache_size</span> <span class="o">=</span> <span class="n">state_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">225</span><span><span class="k">assert</span> <span class="n">state_cache</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">compress_ratio</span> <span class="o">+</span> <span class="n">max_seqlen_q</span> <span class="o">-</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">226</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">227</span><span><span class="c1"># store: each token writes to cache</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">228</span><span><span class="k">for</span> <span class="n">idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">total_q</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">229</span><span>    <span class="n">sidx</span> <span class="o">=</span> <span class="n">state_block_idx</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">230</span><span>    <span class="n">cpos</span> <span class="o">=</span> <span class="p">(</span><span class="n">context_lens</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">()</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="n">state_cache_size</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">231</span><span>    <span class="n">state_cache</span><span class="p">[</span><span class="n">sidx</span><span class="p">,</span> <span class="n">cpos</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="n">score</span><span class="p">[</span><span class="n">idx</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">232</span><span>    <span class="n">state_cache</span><span class="p">[</span><span class="n">sidx</span><span class="p">,</span> <span class="n">cpos</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="n">latent</span><span class="p">[</span><span class="n">idx</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">233</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">234</span><span><span class="c1"># compute: check each token's position</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">235</span><span><span class="n">kv_compressed</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">total_q</span><span class="p">,</span> <span class="n">dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">score</span><span class="o">.</span><span class="n">device</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">236</span><span><span class="k">for</span> <span class="n">idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">total_q</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">237</span><span>    <span class="n">abs_pos</span> <span class="o">=</span> <span class="n">context_lens</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span><span class="o">.</span><span class="n">item</span><span class="p">()</span> <span class="o">-</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">238</span><span>    <span class="k">if</span> <span class="n">abs_pos</span> <span class="o">%</span> <span class="n">compress_ratio</span> <span class="o">==</span> <span class="n">compress_ratio</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/compress.py#L223-L238">deepinfer/model_executor/layers/tilelang_ops/compress.py</a> · lines 223–238</div></div>
+<p class="indent">   For a group of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi></mrow></math> positions
+and up to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>q</mi></mrow><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo></mrow></msub></mrow></math> new positions per
+state slot, retaining <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math> old inputs
+alongside all new inputs requires <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>S</mi> <mo class="MathClass-rel" stretchy="false">≥</mo> <mi>r</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <msub><mrow><mi>q</mi></mrow><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo></mrow></msub> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>.
+This is the same write-before-read hazard encountered with SWA, applied to a different
+ring.
+</p><p class="indent">   In the lab, position zero is old; positions 1 through 6 are written in one step. With
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>S</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>6</mn></mrow></math>, position six takes position
+zero’s slot before pair <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+is read. With <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>S</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>7</mn></mrow></math>,
+no required input is overwritten. The incorrect first component becomes
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>42</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>5</mn></mrow></math>, rather
+than 6. No future position belongs in that pair, even though it has already been written to
+memory.
+</p><p class="indent">   The cache engine derives its ring from the backtracking allowance, and separately decides
+whether an indexer needs its own state:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.5.</b> Compression capacity and the index-state exception.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">123</span><span><span class="k">def</span> <span class="nf">_needs_index_state</span><span class="p">(</span><span class="n">attn_module</span><span class="p">:</span> <span class="n">AttrDict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">124</span><span>    <span class="k">if</span> <span class="n">attn_module</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"index_topk"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">125</span><span>        <span class="k">return</span> <span class="kc">False</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">126</span><span>    <span class="n">index_cfg</span> <span class="o">=</span> <span class="n">attn_module</span><span class="o">.</span><span class="n">cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"attn_index"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">127</span><span>    <span class="k">return</span> <span class="n">index_cfg</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">index_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"use_kproj"</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">128</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">129</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">130</span><span><span class="nd">@lru_cache</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">131</span><span><span class="k">def</span> <span class="nf">get_inference_compress_block_size</span><span class="p">(</span><span class="n">compress_ratio</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">132</span><span><span class="w">    </span><span class="sd">"""Compression ring plus rollback history; environment changes require clearing the cache."""</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">133</span><span>    <span class="k">return</span> <span class="n">compress_ratio</span> <span class="o">+</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_MAX_BACKTRACKING_TOKENS</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L123-L133">deepinfer/worker/cache_engine.py</a> · lines 123–133</div></div>
+<p class="indent">   With the default <code>nextn=5</code>, the backtracking allowance is at least six. For C2 the default ring is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mn>6</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>7</mn></mrow></math>,
+not the SWA ring’s 134. At dimension 512 its score/latent payload is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>7</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>2</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>512</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>4</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>28</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>672</mn></mrow></math> bytes
+per owning layer per state slot. That excludes other state regions and any layout padding.
+Rejecting a draft changes which positions are valid; it does not require clearing every byte, as
+chapter 4 established.
+</p>
+<h3 class="sectionHead" id="one-compressed-result-feeds-two-caches"><span class="titlemark">A.3   </span> <a id="x1-189000A.3"></a>One compressed result feeds two caches</h3>
+<p class="noindent">The main attention module connects ownership to computation:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.6.</b> Give the compressor its completed cache and live state.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">515</span><span><span class="k">assert</span> <span class="n">wait_projected_kv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">516</span><span><span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">PackedWkv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">517</span><span><span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">PackedWkv</span><span class="o">.</span><span class="n">forward_store_kv_cache</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">518</span><span>    <span class="n">wait_projected_kv</span><span class="p">(),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">519</span><span>    <span class="n">kv_cache</span><span class="o">.</span><span class="n">ca_cache</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">520</span><span>    <span class="n">kv_cache</span><span class="o">.</span><span class="n">ca_state</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">521</span><span>    <span class="n">input_metadata</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">522</span><span>    <span class="n">return_pre_rope_kv</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">has_local_index</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">523</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py#L515-L523">deepinfer/model_executor/models/v4_modules/attn.py</a> · lines 515–523</div></div>
+<p class="indent">   The result forks after normalisation and before rotary position encoding. The main branch
+applies RoPE, casts to the main cache format and writes <code>ca_cache</code>. A local indexer also needs
+the normalised pre-RoPE latent:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.7.</b> Retain the normalised latent while storing main KV.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">158</span><span>    <span class="n">cast_args</span><span class="o">=</span><span class="n">CastArgs</span><span class="o">.</span><span class="n">from_cache_format</span><span class="p">(</span><span class="n">cache_format</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">159</span><span>    <span class="n">out_args</span><span class="o">=</span><span class="n">KVCacheOutArgs</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">160</span><span>        <span class="n">kv_cache</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">161</span><span>        <span class="n">input_metadata</span><span class="o">.</span><span class="n">slot_mapping_store_ca</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">ratio_key</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">162</span><span>        <span class="n">out</span><span class="o">=</span><span class="n">pre_rope_kv</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">163</span><span>        <span class="n">out_stage</span><span class="o">=</span><span class="s2">"norm"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">164</span><span>        <span class="n">layout</span><span class="o">=</span><span class="n">cache_format</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">165</span><span>    <span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">166</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">167</span><span><span class="k">return</span> <span class="n">pre_rope_kv</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">pre_rope_kv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/compress.py#L158-L167">deepinfer/model_executor/models/v4_modules/compress.py</a> · lines 158–167</div></div>
+<p class="indent"> <code>out_stage="norm" </code>identifies the retained stage. The surrounding call
+supplies the compressed positions and RoPE parameters. For compressed row
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>j</mi></mrow></math>, the C++ metadata
+uses position <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">jr</mi></mrow></math>,
+the beginning of its group, while a query keeps its original token position. Equal row numbers
+therefore do not imply equal positional coordinates <span class="cite">[<a href="references.html#Xdeepinfer-compressed-metadata">89</a>]</span>. Figure <a href="appendix-a.html#ref-fig:compressed-fork">A.1</a> shows where the two caches
+separate.
+                                                                                  
+                                                                                  
+</p>
+<figure class="figure"><a id="ref-fig:compressed-fork"></a>
+<p class="noindent" id="-the-sparse-layers-two-caches-index-scores-choose-addresses-in-the-main-cache-they-do-not-supply-the-attention-values"><a aria-label="Open figure at full size" class="figure-image" href="webbook28x.svg" rel="noopener" target="_blank"><img alt="Figure A.1: The sparse layer’s two caches. Index scores choose addresses in the main cache;
+they do not supply the attention values." loading="lazy" src="webbook28x.svg"/></a>
+<a id="x1-189001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure A.1: </span><span class="content">The sparse layer’s two caches. Index scores choose addresses in the main cache;
+they do not supply the attention values.
+</span></figcaption>
+
+</figure>
+<p class="indent">   The index branch projects that latent to a smaller key. Its store method requires that no
+independent index compression state be present:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.8.</b> Index-K is projected from the main compressed latent.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">140</span><span><span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">store_index_k</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">141</span><span>    <span class="k">return</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">142</span><span><span class="k">assert</span> <span class="n">index_k_input</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">143</span><span><span class="k">assert</span> <span class="n">state_cache</span> <span class="ow">is</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">144</span><span><span class="n">index_k</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">index_k_module</span><span class="o">.</span><span class="n">forward_pre_norm</span><span class="p">(</span><span class="n">index_k_input</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">145</span><span><span class="n">norm</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">index_k_module</span><span class="o">.</span><span class="n">norm</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">146</span><span><span class="n">fused_norm_rope_hadamard_cast_store_kvcache</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">147</span><span>    <span class="n">index_k</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">148</span><span>    <span class="n">norm_args</span><span class="o">=</span><span class="n">NormArgs</span><span class="p">(</span><span class="n">norm</span><span class="o">.</span><span class="n">weight</span><span class="p">,</span> <span class="n">norm</span><span class="o">.</span><span class="n">variance_epsilon</span><span class="p">),</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/index_attn.py#L140-L148">deepinfer/model_executor/models/v4_modules/index_attn.py</a> · lines 140–148</div></div>
+<p class="indent">   The model configuration selects KProject with <span class="path"><code>attn_index.use_kproj=True</code></span>. The cache
+engine therefore leaves <code>ica_state=None </code>on this V4.1 path. The field remains in the generic
+interface for a separately compressed index path. It is not a second accumulator that every sparse
+layer allocates. <code>ica_cache </code>still exists: absence of live index state does not mean absence of
+completed index keys <span class="cite">[<a href="references.html#Xdeepinfer-index-runtime">90</a>]</span>.
+</p><p class="indent">   This is a model-driven requirement. A block allocator alone cannot decide that the index keys
+derive from the main compressed latent, that C1 needs no pending pair, or that a consumer layer
+reuses another layer’s cache. Those decisions come from the model configuration and its runtime
+adapters.
+</p>
+<h3 class="sectionHead" id="select-rows-then-translate-their-addresses"><span class="titlemark">A.4   </span> <a id="x1-190000A.4"></a>Select rows, then translate their addresses</h3>
+<p class="noindent">An indexer makes a cheaper scoring pass before main attention. The runtime describes its score
+for key <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>k</mi></mrow><mrow><mi>j</mi></mrow></msub></mrow></math>
+as </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>I</mi></mrow><mrow><mi>j</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo><munder class="msub"><mrow><mo> ∑</mo>
+</mrow><mrow><mi>h</mi></mrow></munder><msub><mrow><mi>w</mi></mrow><mrow><mi>h</mi></mrow></msub><mtext class="qopname"> max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>q</mi></mrow><mrow><mi>h</mi></mrow></msub><mo class="MathClass-bin" stretchy="false"> ⋅</mo> <msub><mrow><mi>k</mi></mrow><mrow><mi>j</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   These are learned index queries and head weights, not the main attention softmax probabilities. ReLU
+means <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+DeepGEMM computes the logits; DeepSelect supplies the imported <code>topk</code>. Their kernel internals
+remain outside this walkthrough <span class="cite">[<a href="references.html#Xdeepinfer-index-runtime">90</a>]</span>.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/27_indexing.py
+</code></pre></div>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Scores: [2, 6, 3, 0, 300] | valid prefix: 4
+Top-2 over valid rows: [1, 2]
+Candidate block scores: [6, 3] | retained block: 0
+Top-2 within retained block: [0, 1]
+One valid row, three output slots: [0, -1, -1]
+Prefill at gathered offset 10: [11, 12]
+Decode logical rows: [1, 2, 4, -1] -&gt; physical slots: [29, 30, 8, -1]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/27_indexing.txt">results/27_indexing.txt</a></div></div>
+<p class="indent">   The lab uses two query heads, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, with weights
+1 and 2. Key <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+scores 6, while <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+scores 3. The fifth key would score 300, but it is outside the valid prefix. The chosen rows are 1
+and 2, not 4. The calculations omit projection, RoPE and quantisation and use a stated
+index-based tie rule; they do not reproduce the device top-k implementation.
+</p><p class="indent">   The teaching score uses ordinary integer arithmetic:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.9.</b> Score one key against two query heads.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">16</span><span><span class="k">def</span> <span class="nf">score</span><span class="p">(</span><span class="n">key</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span><span class="n">w</span> <span class="o">*</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">sum</span><span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">b</span> <span class="k">for</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">key</span><span class="p">)))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>               <span class="k">for</span> <span class="n">w</span><span class="p">,</span> <span class="n">q</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">WEIGHTS</span><span class="p">,</span> <span class="n">Q</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/27_indexing.py">labs/27_indexing.py</a> · lines 16–18</div></div>
+
+<h4 class="subsectionHead" id="validity-comes-before-ranking"><span class="titlemark">A.4.1   </span> <a id="x1-191000A.4.1"></a>Validity comes before ranking</h4>
+<p class="noindent">A query at original position <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math>
+can see <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌊</mo><mo class="MathClass-open" stretchy="false">(</mo><mi>p</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><mi>r</mi><mo class="MathClass-close" stretchy="false">⌋</mo></mrow></math>
+completed compressed rows. The metadata supplies that count per query:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.10.</b> Count completed compressed rows at each query position.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">591</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">args</span><span class="p">.</span><span class="n">sparse_compress_ratios</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">592</span><span><span class="w">    </span><span class="n">py</span><span class="o">::</span><span class="n">str</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">to_string</span><span class="p">(</span><span class="n">r</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">593</span><span><span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">klen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_or_create_tensor</span><span class="p">(</span><span class="n">klen_dict</span><span class="p">,</span><span class="w"> </span><span class="n">has_out</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">total_q</span><span class="p">},</span><span class="w"> </span><span class="n">torch</span><span class="o">::</span><span class="n">kInt32</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">594</span><span><span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">p_klen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">klen</span><span class="p">.</span><span class="n">mutable_data_ptr</span><span class="o">&lt;</span><span class="kt">int32_t</span><span class="o">&gt;</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">595</span><span><span class="w">    </span><span class="n">i_q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">596</span><span><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">p_seq</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">seq_metadata_list</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">597</span><span><span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int32_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_k</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_q</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p_seq</span><span class="o">-&gt;</span><span class="n">seqlen_k</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">j</span><span class="p">,</span><span class="w"> </span><span class="o">++</span><span class="n">i_q</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">598</span><span><span class="w">            </span><span class="n">p_klen</span><span class="p">[</span><span class="n">i_q</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">r</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">599</span><span><span class="w">        </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">600</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">601</span><span><span class="w">    </span><span class="n">TORCH_CHECK_EQ</span><span class="p">(</span><span class="n">i_q</span><span class="p">,</span><span class="w"> </span><span class="n">total_q</span><span class="p">);</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L591-L601">csrc/engine/input_metadata/prepare_tensor_input_v4.cpp</a> · lines 591–601</div></div>
+<p class="indent">   For C2, query zero sees no completed row; query one sees row zero; query two still
+sees only row zero. The most recent unpaired token remains available through the
+layer’s SWA path. A large score in an unwritten or future slot must not enter the
+selection.
+</p><p class="indent">   Decode passes an explicit valid range to top-k:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.11.</b> Bound top-k and restore candidate-relative indices.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">494</span><span><span class="n">topk_index</span> <span class="o">=</span> <span class="n">topk</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">495</span><span>    <span class="n">p_sum</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">496</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">topk_tokens</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">497</span><span>    <span class="nb">sorted</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">498</span><span>    <span class="n">end</span><span class="o">=</span><span class="n">topk_lens</span><span class="p">,</span>  <span class="c1"># We must pass `end` to the topk kernel since OOB p_sum is not cleaned.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">499</span><span>    <span class="n">indices_type</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">500</span><span>    <span class="n">sorted_index</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">501</span><span>    <span class="n">idx_oob_fill_value</span><span class="o">=-</span><span class="mi">1</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">502</span><span>    <span class="n">return_value</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">503</span><span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">504</span><span><span class="k">if</span> <span class="n">candidate_blocks</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">505</span><span>    <span class="n">restore_candidate_indices_inplace</span><span class="p">(</span><span class="n">topk_index</span><span class="p">,</span> <span class="n">candidate_blocks</span><span class="p">,</span> <span class="n">candidate_block_size</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/index_attn.py#L494-L505">deepinfer/model_executor/models/v4_modules/index_attn.py</a> · lines 494–505</div></div>
+<p class="indent"> <code>end </code>excludes invalid score storage, whose contents need not have been cleared.
+<code>idx_oob_fill_value=-1 </code>fills unused output lanes. The request for <code>sorted_index=True </code>concerns
+index ordering, not decreasing score order. The lab returns a set of chosen rows in index order
+and checks its total score against all pairs of valid rows. It also checks empty and undersized
+ranges.
+</p>
+<h4 class="subsectionHead" id="candidate-blocks-are-another-restriction"><span class="titlemark">A.4.2   </span> <a id="x1-192000A.4.2"></a>Candidate blocks are another restriction</h4>
+<p class="noindent">Some layers first reduce index scores by candidate block, using a maximum, and select blocks for later
+layers to search. This grouping is distinct from the allocator’s 128-token page. In the lab, two index
+keys form a candidate block: block scores are 6 and 3. Retaining only the first block changes token
+top-2 from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>
+to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+Thus top-k <em>within candidates </em>need not equal top-k over all valid keys, even with exact
+arithmetic.
+</p><p class="indent">   The runtime’s candidate consumer accepts block sizes 8 or 16 in compressed-row units and
+imposes further width constraints; the lab’s block size two and single retained block are
+deliberately smaller teaching values. A source layer fills <code>block_candidate_idxs</code>; a
+consumer computes logits only within that set, then restores compact candidate offsets to
+logical row indices. Comparing this model with unrestricted attention would require a
+model-quality check, not merely equality between two implementations of restricted top-k
+<span class="cite">[<a href="references.html#Xdeepinfer-index-runtime">90</a>, <a href="references.html#Xdeepinfer-sharing-topology">91</a>]</span>.
+</p><p class="indent">   Prefill limits the size of its intermediate score matrix with <code>compute_chunk_size</code>. It derives
+the row width from either the full compressed context or the candidate set, applies the memory
+budget, rounds to multiples of eight and caps the chunk at 8,192 queries. That is a temporary
+logit-storage budget, not the number of keys finally selected.
+</p>
+<h4 class="subsectionHead" id="the-same-logical-row-has-two-physical-representations"><span class="titlemark">A.4.3   </span> <a id="x1-193000A.4.3"></a>The same logical row has two physical representations</h4>
+<p class="noindent">For prefill, <code>_load_prefill_kv </code>gathers keys into a concatenated sequence buffer. Top-k adds the
+request’s <code>ks </code>offset, or restores candidate indices with that offset. With base 10, logical rows 1 and
+2 become 11 and 12.
+</p><p class="indent">   Decode keeps paged storage. With <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi></mrow></math>
+original-token positions per allocator block, a
+ratio-<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi></mrow></math> cache has
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>B</mi></mrow><mrow><mi>c</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>B</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>r</mi></mrow></math> compressed rows in
+that block. Logical row <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>j</mi></mrow></math>
+maps to </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="text"><mtext>slot</mtext></mstyle><mo class="MathClass-open" stretchy="false">(</mo><mi>j</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle class="text"><mtext>block table</mtext></mstyle><mo class="MathClass-open" stretchy="false">[</mo><mo class="MathClass-open" stretchy="false">⌊</mo><mi>j</mi><mo class="MathClass-bin" stretchy="false">∕</mo><msub><mrow><mi>B</mi></mrow><mrow><mi>c</mi></mrow></msub><mo class="MathClass-close" stretchy="false">⌋</mo><mo class="MathClass-close" stretchy="false">]</mo><msub><mrow><mi>B</mi></mrow><mrow><mi>c</mi></mrow></msub> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mi>j</mi><mspace width="0.2em"></mspace><mo class="MathClass-bin" stretchy="false"> mod</mo><mspace width="0.2em"></mspace> <msub><mrow><mi>B</mi></mrow><mrow><mi>c</mi></mrow></msub><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The released indexer performs this conversion after candidate offsets have been
+restored:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.12.</b> Convert selected logical rows to paged cache slots.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">506</span><span><span class="c1"># topk outputs the logical index of the compressed token within the seq, which is converted in place into the kvcache</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">507</span><span><span class="c1"># physical slot through block_tables (-1 is kept)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">508</span><span><span class="n">convert_kv_index</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">509</span><span>    <span class="n">topk_index</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">510</span><span>    <span class="n">compressed_block_size</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">511</span><span>    <span class="n">topk_lens</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">512</span><span>    <span class="n">input_metadata</span><span class="o">.</span><span class="n">block_tables</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">513</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">514</span><span><span class="k">return</span> <span class="n">topk_index</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/index_attn.py#L506-L514">deepinfer/model_executor/models/v4_modules/index_attn.py</a> · lines 506–514</div></div>
+<p class="indent">   The lab’s smaller page has <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>B</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>r</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>B</mi></mrow><mrow><mi>c</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>,
+with block table <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>7</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+Rows 1, 2 and 4 map to slots 29, 30 and 8. Its last lane represents padding and remains
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>. The
+CUDA conversion checks the lane’s position against the valid count; callers must not put an
+arbitrary invalid index in a lane declared valid. The lab’s sentinel guard is a teaching convenience,
+not a transcription of that kernel <span class="cite">[<a href="references.html#Xdeepinfer-index-addresses">92</a>]</span>.
+</p><p class="indent">   Finally, main attention reads the SWA and compressed branches together:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.13.</b> Supply the selected main-KV rows alongside SWA.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">640</span><span><span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_swa</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">641</span><span>    <span class="n">attn_kv_args</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">642</span><span>        <span class="n">key_cache</span><span class="o">=</span><span class="n">kv_cache</span><span class="o">.</span><span class="n">swa_cache</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">643</span><span>        <span class="n">indices_in_kvcache</span><span class="o">=</span><span class="n">kv_swa_index</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">644</span><span>        <span class="n">key_cache_extra</span><span class="o">=</span><span class="n">kv_cache</span><span class="o">.</span><span class="n">ca_cache</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">645</span><span>        <span class="n">indices_in_kvcache_extra</span><span class="o">=</span><span class="n">kv_ca_index</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">646</span><span>        <span class="n">index_length_extra</span><span class="o">=</span><span class="n">dense_index_len</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">647</span><span>    <span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py#L640-L647">deepinfer/model_executor/models/v4_modules/attn.py</a> · lines 640–647</div></div>
+<p class="indent">   The following <code>decode_mla_mqa_sparse </code>call goes to FlashMLA. It receives <code>ca_cache</code>, not the
+smaller <code>ica_cache</code>, as its extra key/value storage. This completes the path from compression
+state to the actual attention read <span class="cite">[<a href="references.html#Xdeepinfer-compressed-attention">93</a>]</span>.
+                                                                                  
+                                                                                  
+</p>
+<h3 class="sectionHead" id="count-rows-payloads-and-owners-separately"><span class="titlemark">A.5   </span> <a id="x1-194000A.5"></a>Count rows, payloads and owners separately</h3>
+<p class="noindent">C2 halves the completed row count relative to C1. Low precision separately changes each row’s
+byte count. The index format specifies 128 FP4 elements and one one-byte UE8M0 scale per 32
+elements:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.14.</b> The index cache stores packed values and scale factors.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">129</span><span><span class="n">FP4_INDEX_KV_FORMAT</span> <span class="o">=</span> <span class="n">KVCacheFormat</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">130</span><span>    <span class="n">quantized_dtype</span><span class="o">=</span><span class="s2">"e2m1"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">131</span><span>    <span class="n">quantized_elements</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">132</span><span>    <span class="n">elements_per_sf</span><span class="o">=</span><span class="mi">32</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">133</span><span>    <span class="n">bf16_elements</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">134</span><span>    <span class="n">do_cast</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">135</span><span>    <span class="n">sf_format</span><span class="o">=</span><span class="s2">"ue8m0"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">136</span><span>    <span class="n">note</span><span class="o">=</span><span class="s2">"V4/V41, index kv."</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">137</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cache_common.py#L129-L137">deepinfer/model_executor/layers/tilelang_ops/cache_common.py</a> · lines 129–137</div></div>
+<p class="indent">   The same file describes main formats. Here E2M1 and E4M3 name floating-point encodings;
+UE8M0 is the unsigned exponent scale encoding. The relevant accounting is payload bits plus the
+stored scales: </p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-54"><colgroup id="TBL-54-1g"><col id="TBL-54-1"/><col id="TBL-54-2"/><col id="TBL-54-3"/></colgroup><tr id="TBL-54-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-54-1-1" style="text-align:left; white-space:nowrap;">Cache format    </td><td class="td11" id="TBL-54-1-2" style="text-align:left; white-space:nowrap;"> Data plus scales                                                                                                   </td><td class="td10" id="TBL-54-1-3" style="text-align:left; white-space:nowrap;"> Bytes per row</td>
+</tr><tr id="TBL-54-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-54-2-1" style="text-align:left; white-space:nowrap;">Main/SWA FP8  </td><td class="td11" id="TBL-54-2-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>512</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>512</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>32</mn></mrow></math> </td><td class="td10" id="TBL-54-2-3" style="text-align:left; white-space:nowrap;"> 528              </td>
+</tr><tr id="TBL-54-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-54-3-1" style="text-align:left; white-space:nowrap;">Main FP4          </td><td class="td11" id="TBL-54-3-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>512</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>512</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>16</mn></mrow></math> </td><td class="td10" id="TBL-54-3-3" style="text-align:left; white-space:nowrap;"> 288              </td>
+</tr><tr id="TBL-54-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-54-4-1" style="text-align:left; white-space:nowrap;">Index FP4         </td><td class="td11" id="TBL-54-4-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>128</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>128</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>32</mn></mrow></math> </td><td class="td10" id="TBL-54-4-3" style="text-align:left; white-space:nowrap;"> 68               </td>
+</tr></table></div> </div></div>
+<p class="indent">   The main FP4 format uses one E4M3 scale per 16 values; its scale format differs from the
+index format. Main/SWA caches interleave data and scales within each row, whereas the index
+cache uses block-wide data and scale sections. The 68-byte figure is a logical per-row byte budget,
+not a claim that each physical index row is laid out as 64 immediately adjacent data
+bytes followed by four scales. Alignment and shared ownership affect total allocation
+<span class="cite">[<a href="references.html#Xdeepinfer-cache-format">24</a>, <a href="references.html#Xdeepinfer-index-runtime">90</a>]</span>.
+</p><p class="indent">   A 128-position C2 block has 64 completed-row slots. An owning main cache uses
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>64</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>528</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>33</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>792</mn></mrow></math>
+payload bytes with FP8, or 18,432 with FP4; an owning index cache uses
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>64</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>68</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>352</mn></mrow></math>. The
+cache engine rounds regions to its alignment requirements and does not allocate another copy for
+a sharing consumer. The live 28,672-byte compression-state example is a separate per-request
+allocation. These equations explain chapter 4’s rows without claiming a measured reduction in
+model error or end-to-end latency.
+                                                                                  
+                                                                                  
+</p>
+<h3 class="sectionHead" id="sharing-has-several-meanings"><span class="titlemark">A.6   </span> <a id="x1-195000A.6"></a>Sharing has several meanings</h3>
+<p class="noindent">Chapter 9 separated YOCO’s shared hidden state from segmented sharing. Here are the latter’s
+distinct objects: </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-57"><colgroup id="TBL-57-1g"><col id="TBL-57-1"/><col id="TBL-57-2"/><col id="TBL-57-3"/></colgroup><tr id="TBL-57-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Map</span> </p></td><td class="td11" id="TBL-57-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Reused
+  object</span> </p></td><td class="td10" id="TBL-57-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Work
+  a
+  consumer
+  may
+  still
+  do</span> </p></td>
+</tr><tr id="TBL-57-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>layer_kv_map</code></span> </p></td><td class="td11" id="TBL-57-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Main
+  compressed
+  KV</span> </p></td><td class="td10" id="TBL-57-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Project
+  index-K
+  or
+  choose
+  new
+  indices</span> </p></td>
+</tr><tr id="TBL-57-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>layer_index_k_map</code></span> </p></td><td class="td11" id="TBL-57-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Index
+  keys</span> </p></td><td class="td10" id="TBL-57-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Score
+  its
+  own
+  queries
+  and
+  choose
+  indices</span> </p></td>
+</tr><tr id="TBL-57-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>layer_index_module_map</code></span> </p></td><td class="td11" id="TBL-57-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Selected
+  top-k
+  indices</span> </p></td><td class="td10" id="TBL-57-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Main
+  attention
+  using
+  its
+  queries</span> </p></td>
+</tr><tr id="TBL-57-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>layer_candidate_source_map</code></span> </p></td><td class="td11" id="TBL-57-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Candidate
+  block
+  set</span> </p></td><td class="td10" id="TBL-57-5-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Token
+  top-k
+  within
+  those
+  blocks</span> </p></td>
+</tr><tr id="TBL-57-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-57-6-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   For a four-layer teaching example, main-KV sources might be
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, index-K
+sources <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, and
+index sources <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+Each finer segment lies inside a coarser one. An index-K source cannot project from a main KV
+belonging to a different segment. The topology checks this refinement:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing A.15.</b> A finer sharing segment must stay inside its source segment.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">181</span><span><span class="nd">@staticmethod</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">182</span><span><span class="k">def</span> <span class="nf">_validate_map_refines</span><span class="p">(</span><span class="n">fine_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">fine</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span> <span class="n">coarse_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">coarse</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">183</span><span>    <span class="c1"># Under the segmented assumption, coarse[fine[l]] == coarse[l] is equivalent to every segment of fine</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">184</span><span>    <span class="c1"># falling inside a single segment of coarse.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">185</span><span>    <span class="k">for</span> <span class="n">layer_id</span><span class="p">,</span> <span class="n">fine_src</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">fine</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">186</span><span>        <span class="k">assert</span> <span class="n">coarse</span><span class="p">[</span><span class="n">fine_src</span><span class="p">]</span> <span class="o">==</span> <span class="n">coarse</span><span class="p">[</span><span class="n">layer_id</span><span class="p">],</span> <span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">187</span><span>            <span class="sa">f</span><span class="s2">"shared </span><span class="si">{</span><span class="n">fine_name</span><span class="si">}</span><span class="s2"> map must refine </span><span class="si">{</span><span class="n">coarse_name</span><span class="si">}</span><span class="s2"> map: layer </span><span class="si">{</span><span class="n">layer_id</span><span class="si">}</span><span class="s2"> -&gt; </span><span class="si">{</span><span class="n">fine_name</span><span class="si">}</span><span class="s2"> source </span><span class="si">{</span><span class="n">fine_src</span><span class="si">}</span><span class="s2">, "</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">188</span><span>            <span class="sa">f</span><span class="s2">"but </span><span class="si">{</span><span class="n">coarse_name</span><span class="si">}</span><span class="s2"> sources differ: </span><span class="si">{</span><span class="n">coarse</span><span class="p">[</span><span class="n">layer_id</span><span class="p">]</span><span class="si">}</span><span class="s2"> != </span><span class="si">{</span><span class="n">coarse</span><span class="p">[</span><span class="n">fine_src</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">189</span><span>        <span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/cross_layer.py#L181-L189">deepinfer/model_executor/models/v4_modules/cross_layer.py</a> · lines 181–189</div></div>
+<p class="indent">   This is only an example of valid map nesting, not a replacement model configuration. Other
+checks require compatible layer settings, preceding source layers and a fresh KV source at the
+YOCO boundary. The topology is static; <code>CrossLayerRuntime </code>carries pre-RoPE KV,
+loaded index keys, indices and candidate data from source to consumer during a forward
+call. Under YOCO compaction, full-layout main/index KV may already have been
+written, so the compact query path skips those stores. Chapter 9 covered that boundary
+<span class="cite">[<a href="references.html#Xdeepinfer-sharing-topology">91</a>, <a href="references.html#Xdeepinfer-compressed-attention">93</a>]</span>.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next11"><span class="titlemark">A.7   </span> <a id="x1-196000A.7"></a>Experiments to try next</h3>
+<p class="noindent">The labs check rational compression, state lifetime and index/address arithmetic; they do not
+establish accelerator equivalence or acceptable generation quality. The released compression tests
+compare device outputs with a tensor reference and check state tensors. We inspected those
+assertions without running the tests.
+</p><ol class="enumerate1">
+<li class="enumerate" id="x1-196002x1">Change the first pair’s weights so each channel has equal weights. Which outputs
+     become ordinary averages? Keep the chunk checks unchanged.
+     </li>
+<li class="enumerate" id="x1-196004x2">Explain  why  a  zero-valid-row  prefill  chunk  still  reserves  an  output  row.  Which
+     metadata prevents that placeholder from becoming a real cache entry?
+     </li>
+<li class="enumerate" id="x1-196006x3">For C2 with at most four new positions, derive a sufficient compression ring size and
+     construct the write that would break a smaller ring.
+     </li>
+<li class="enumerate" id="x1-196008x4">Give an example where restricting candidates preserves token top-k, and one where
+     it changes it. What would a model-quality evaluation need in addition?
+                                                                                  
+                                                                                  
+     </li>
+<li class="enumerate" id="x1-196010x5">Trace one selected compressed row through <code>ica_cache</code>, top-k, the block table and
+     <code>ca_cache</code>. Which steps change values, and which only change addresses or the set of
+     rows read?</li></ol>
+<p class="indent">   The reading path distinguishes pending state, completed KV and selection keys. Use those
+distinctions to locate the next reader of a row and check its validity.
+                                                                                  
+                                                                                  
+<a id="x1-196011r194"></a>
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-11.html"><small>PREVIOUS</small>← From an engine to a service</a><a class="next" href="appendix-b.html"><small>NEXT</small>Repository and execution map →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#a-pair-is-complete-only-at-its-boundary">A.1 A pair is complete only at its boundary</a><a class="toc-sub" href="#chunk-boundaries-and-placeholder-rows">A.1.1 Chunk boundaries and placeholder rows</a><a class="" href="#temporary-state-must-survive-speculative-writes">A.2 Temporary state must survive speculative writes</a><a class="" href="#one-compressed-result-feeds-two-caches">A.3 One compressed result feeds two caches</a><a class="" href="#select-rows-then-translate-their-addresses">A.4 Select rows, then translate their addresses</a><a class="toc-sub" href="#validity-comes-before-ranking">A.4.1 Validity comes before ranking</a><a class="toc-sub" href="#candidate-blocks-are-another-restriction">A.4.2 Candidate blocks are another restriction</a><a class="toc-sub" href="#the-same-logical-row-has-two-physical-representations">A.4.3 The same logical row has two physical representations</a><a class="" href="#count-rows-payloads-and-owners-separately">A.5 Count rows, payloads and owners separately</a><a class="" href="#sharing-has-several-meanings">A.6 Sharing has several meanings</a><a class="" href="#experiments-to-try-next11">A.7 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

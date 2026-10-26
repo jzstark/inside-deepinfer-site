@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From an engine to a service · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link active" href="chapter-11.html" aria-current="page"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 11</p><h1 class="chapterHead" id="from-an-engine-to-a-service"><a id="x1-16700011"></a>From an engine to a service</h1>
+<p class="noindent"><a id="ref-ch:service"></a>
+</p><p class="indent">   Chapter 10 examined correctness contracts within an engine. A service also passes requests
+and state between engines and storage. Those boundaries decide where work can run and what it
+must wait for.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-13">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">Four requests share a long prefix. Two prefill workers are available, but only one
+holds the prefix. Should all four requests wait for that worker? If both workers could
+reuse it, which queue would become shorter? </p>
+</div>
+</div>
+<p class="indent">   Run the service experiment:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/23_service.py
+</code></pre></div>
+<p class="indent">   All four requests arrive at time zero. Each prompt has 1,024 tokens, of which 768 can be
+reused. Matching takes one time unit; prefill processes 128 new tokens per unit. Two decode
+workers each need four units per request. A handoff adds one unit, with no limit on concurrent
+transfers. These are assigned costs. The workers serve one request at a time, without batching or
+eviction. Prefix fetching adds no delay in either case; only the P/D handoff has an assigned
+transfer cost.
+</p><p class="indent">   The first case sends every request to the worker holding the local prefix. The second lets either
+worker fetch that same prefix, at the same assigned cost:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Assigned time units; four requests, two P and two D workers
+local affinity: P ends [3, 5, 7, 9]; D ends [8, 10, 12, 14]
+shared cache: P ends [3, 3, 5, 5]; D ends [8, 8, 12, 12]
+shared, no hits: P ends [9, 9, 17, 17]; D ends [14, 14, 22, 22]
+shared, slower handoff: P ends [3, 3, 5, 5]; D ends [10, 10, 14, 14]
+affinity, slower handoff: P ends [3, 5, 7, 9]; D ends [10, 12, 14, 16]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/23_service.txt">results/23_service.txt</a></div></div>
+<p class="indent">   With local affinity, prefill finishes at 3, 5, 7 and 9. With a shared cache it finishes at 3, 3, 5
+and 5. The last answer arrives two units earlier, not four: decode now makes the last
+pair wait. With equal handoff delays, sharing saves two units in both comparisons: 14
+versus 12 with a one-unit handoff, and 16 versus 14 with a three-unit handoff. A shared
+cache with the slower handoff finishes no earlier than local affinity with the faster one.
+That comparison changes two variables: the extra transfer cost offsets the saving from
+sharing.
+</p><p class="indent">   The no-hit case supplies a baseline for reuse: both prefill workers remain available, but
+processing all 1,024 positions per request moves the last completion from 12 to 22, with the
+handoff delay held at one unit.
+</p><p class="indent"> <strong>Scope and order. </strong>We follow the deployment Q&amp;A from prefix matching to routing, state
+movement and token output. Released DeepInfer code fixes the engine roles and the state layout
+at those boundaries. The Q&amp;A describes the service that connects them. We then
+audit a published performance curve, using chapter 2’s accounting and chapter 8’s
+acceptance model. Our experiments calculate queues and rates; they do not run a serving
+cluster.
+</p>
+<h3 class="sectionHead" id="a-request-crosses-several-owners"><span class="titlemark">11.1   </span> <a id="x1-16800011.1"></a>A request crosses several owners</h3>
+<p class="noindent">The engine of chapter 1 was responsible for advancing requests. A service must first decide which
+engine should own each request and how its reusable state will reach that engine. Figure <a href="chapter-11.html#ref-fig:service-path">11.1</a>
+separates the request’s route from the storage it can use. A released component does not imply
+                                                                                  
+                                                                                  
+that its production orchestration is also released.
+</p>
+<figure class="figure"><a id="ref-fig:service-path"></a>
+<p class="noindent" id="-the-documented-textrequest-path-r-code-released-in-deepinfer-s-separately-released-project-d-service-logic-described-in-the-qa-the-two-storage-boxes-show-the-state-fetched-by-the-pe-through-the-described-transfer-driver-matching-itself-consults-local-metadata-output-tokens-return-through-recipes-decoding-path"><a aria-label="Open figure at full size" class="figure-image" href="webbook26x.svg" rel="noopener" target="_blank"><img alt="Figure 11.1: The  documented  text-request  path.  [R]:  code  released  in  DeepInfer;  [S]:
+separately released project; [D]: service logic described in the Q&amp;A. The two storage boxes
+show the state fetched by the PE through the described transfer driver; matching itself
+consults local metadata. Output tokens return through Recipe’s decoding path." loading="lazy" src="webbook26x.svg"/></a>
+<a id="x1-168001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 11.1:  </span><span class="content">The  documented  text-request  path.  [R]:  code  released  in  DeepInfer;  [S]:
+separately released project; [D]: service logic described in the Q&amp;A. The two storage boxes
+show the state fetched by the PE through the described transfer driver; matching itself
+consults local metadata. Output tokens return through Recipe’s decoding path.
+</span></figcaption>
+
+</figure>
+<p class="indent">   DeepInfer names the roles directly:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.1.</b> Three engine roles.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">11</span><span><span class="n">NORMAL</span> <span class="o">=</span> <span class="mi">0</span>  <span class="c1"># process prompts &amp; completions</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span><span class="n">PROMPT</span> <span class="o">=</span> <span class="n">enum</span><span class="o">.</span><span class="n">auto</span><span class="p">()</span>  <span class="c1"># only process prompts</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span><span class="n">COMPLETION</span> <span class="o">=</span> <span class="n">enum</span><span class="o">.</span><span class="n">auto</span><span class="p">()</span>  <span class="c1"># only process completions</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/engine_type.py#L11-L13">deepinfer/engine/engine_type.py</a> · lines 11–13</div></div>
+<p class="indent">   A prefill engine, abbreviated PE in the Q&amp;A, uses the PROMPT role. A decode
+or completion engine, CE, uses COMPLETION. NORMAL combines the two. After
+scheduling, the engine checks that a nonempty PROMPT step is actually a prompt
+step:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.2.</b> The prompt engine must not decode.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">947</span><span><span class="k">if</span> <span class="ow">not</span> <span class="n">scheduler_outputs</span><span class="o">.</span><span class="n">is_empty</span><span class="p">()</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine_type</span> <span class="o">==</span> <span class="n">EngineType</span><span class="o">.</span><span class="n">PROMPT</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">948</span><span>    <span class="k">assert</span> <span class="n">scheduler_outputs</span><span class="o">.</span><span class="n">prompt_run</span><span class="p">,</span> <span class="s2">"Prompt engines should not perform decoding"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">949</span><span>    <span class="k">assert</span> <span class="n">seq_metadata_list</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">seqlen_q</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="s2">"seqlen_q should be &gt; 0"</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L947-L949">deepinfer/engine/llm_engine.py</a> · lines 947–949</div></div>
+<p class="indent">   These are executable role boundaries. They do not locate the machine-selection policy, the
+network transfer, or the service’s retry logic. The distinction also matters when reading
+benchmarks: <span class="path"><code>examples/benchmark.py</code></span> constructs its LLM through <code>create_llm </code>without
+overriding the engine role. It therefore uses <code>EngineArgs.engine_type = EngineType.NORMAL</code>,
+the default at <span class="path"><code>deepinfer/engine/arg_utils.py</code></span>:41. The examples README calls
+the separate prefill and decode measurements “Stage decoupling”. Those windows are
+inside one combined engine deployment; they are not a disaggregated P/D service
+<span class="cite">[<a href="references.html#Xdeepinfer-config">17</a>, <a href="references.html#Xdeepinfer-benchmark">15</a>, <a href="references.html#Xdeepinfer-service-roles">83</a>]</span>.
+</p>
+<div class="table">
+<figure class="float" id="-three-access-boundaries-public-projects-in-the-middle-column-do-not-supply-a-pinned-version-of-the-production-deployment"><a id="ref-tab:service-release"></a>
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-43"><colgroup id="TBL-43-1g"><col id="TBL-43-1"/><col id="TBL-43-2"/><col id="TBL-43-3"/></colgroup><tr id="TBL-43-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-43-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Released in DeepInfer</span> </p></td><td class="td11" id="TBL-43-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Separately released</span> </p></td><td class="td10" id="TBL-43-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Described service logic</span> </p></td>
+</tr><tr id="TBL-43-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-43-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Engine    roles,    scheduling,
+state-layout  helpers,  EPLB
+internals, benchmarks</span> </p></td><td class="td11" id="TBL-43-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DeepSeek      Recipe      for
+  protocol/token   conversion;
+  3FS for distributed storage</span> </p></td><td class="td10" id="TBL-43-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Entrypoint          matching,
+  kvcache-store,
+  GC-worker policy, stage load
+  balancers,  autoscaling  and
+  P/D transfer orchestration</span> </p></td>
+</tr><tr id="TBL-43-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-43-3-1" style="text-align:left;"></td></tr></table></div><a id="x1-168002r1"></a>
+<figcaption class="caption"><span class="id">Table 11.1: </span><span class="content">Three access boundaries. Public projects in the middle column do not supply
+a pinned version of the production deployment.
+</span></figcaption>
+
+</figure>
+</div>
+<p class="indent">   The Q&amp;A identifies one property shared with the DeepSeek-V3/R1 inference system:
+attention uses data parallelism, with equal DP and EP sizes. It also points to DualPath’s
+intra-group scheduling for the decode balancer, but gives no link or bibliographic reference
+for DualPath. These establish a stated continuity in that parallelism choice and an
+acknowledged scheduling precedent. The separate 3FS repository is a dependency boundary.
+None establishes a line-by-line derivation of the service code, which is absent here
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>, <a href="references.html#Xdeepseek-service-projects">86</a>]</span>.
+</p><p class="indent">   Image requests add an encoder before prefill: the Q&amp;A describes E/P/D separation. Its
+vision-encoder balancer first chooses a machine randomly, then chooses the GPU with the fewest
+assigned patches, counting width and height in patch units. Recipe handles the API-to-model
+representation. This adds a workload and a queue to the map, without changing why prefill and
+decode need different capacity signals <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="hits-decide-prefill-demand"><span class="titlemark">11.2   </span> <a id="x1-16900011.2"></a>Hits decide prefill demand</h3>
+<p class="noindent">A prefix hit is useful before any bytes move. The Entrypoint matches a hash chain against
+metadata in the local kvcache-store’s CHECK role. A hash chain identifies a block
+together with its preceding prefix, so reuse concerns a matching history, not just an
+equal block of tokens. The resulting hit length determines how much prompt work
+remains. Routing needs that answer; the Q&amp;A explicitly says matching cannot be hidden
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   For prompt length <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi></mrow></math> and
+computation resuming at <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>H</mi></mrow></math>,
+let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>H</mi></mrow></math>.
+Chapter 5’s documented quota model estimates work from the new positions
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math> and their
+existing context <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>c</mi></mrow></math>.
+The service can then choose a prefill tier, an engine with quota left, and a rank within it:
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle class="text"><mtext>match</mtext></mstyle><mo class="MathClass-rel" stretchy="false">→</mo><mi>H</mi><mo class="MathClass-rel" stretchy="false">→</mo><mo class="MathClass-open" stretchy="false">(</mo><mi>q</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-rel" stretchy="false">→</mo><mtext class="qopname">cost</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>q</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-rel" stretchy="false">→</mo><mstyle class="text"><mtext>routing and capacity</mtext></mstyle><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The quota fit and its service driver are described in the Q&amp;A, not implemented in the released
+scheduler. A cache hit also leaves context to read; reducing new positions does not remove all
+attention work.
+</p><p class="indent">   The storage placement changes a routing constraint. With block KV in a separate
+shared cluster, every prefill engine can hit any prefix. It need not wait for the compute
+                                                                                  
+                                                                                  
+machine that produced that prefix. This is the Q&amp;A’s reason for having no prefix-affinity
+routing.
+</p><p class="indent">   Our lab holds the prefix and fetch costs fixed and changes only the eligible workers:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.3.</b> Choose from the local owner or both workers.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="k">for</span> <span class="n">request</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>        <span class="n">candidates</span> <span class="o">=</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="k">if</span> <span class="n">shared</span> <span class="k">else</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>        <span class="n">rank</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="p">(</span><span class="n">prefill_free</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">i</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>        <span class="n">start</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">prefill_free</span><span class="p">[</span><span class="n">rank</span><span class="p">])</span>  <span class="c1"># matching completes before routing</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>        <span class="n">end</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="p">(</span><span class="mi">1024</span> <span class="o">-</span> <span class="n">hit</span><span class="p">)</span> <span class="o">//</span> <span class="mi">128</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>        <span class="n">prefill_free</span><span class="p">[</span><span class="n">rank</span><span class="p">]</span> <span class="o">=</span> <span class="n">end</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>        <span class="n">prefilled</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">end</span> <span class="o">+</span> <span class="n">transfer</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">rank</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">end</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/23_service.py">labs/23_service.py</a> · lines 19–25</div></div>
+<p class="indent">   A local-cache service could instead route to an idle worker and recompute the prefix. That is
+another policy, not tested by the affinity case. Real shared storage pays for fetching and can itself
+queue. The experiment isolates the benefit of removing ownership affinity; it does not predict that
+shared storage always wins.
+</p>
+<h4 class="subsectionHead" id="from-work-to-a-capacity-estimate"><span class="titlemark">11.2.1   </span> <a id="x1-17000011.2.1"></a>From work to a capacity estimate</h4>
+<p class="noindent">Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>λ</mi></mrow></math> be requests per second,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi></mrow></math> their fixed input length,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>O</mi></mrow></math> their fixed output length,
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math> the fraction of input
+tokens reused. Suppose <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>P</mi> </mrow></msub></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>D</mi></mrow></msub></mrow></math>
+are sustained per-GPU rates for this workload. At a target utilisation
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>u</mi></mrow></math>, a
+simple capacity estimate is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<msub><mrow><mi>G</mi></mrow><mrow><mi>P</mi> </mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mrow><mo fence="true" form="prefix"> ⌈</mo><mrow><mfrac><mrow><mi mathvariant="italic">λL</mi><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>h</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>u</mi><msub><mrow><mi>v</mi></mrow><mrow><mi>P</mi> </mrow></msub></mrow></mfrac> </mrow><mo fence="true" form="postfix">⌉</mo></mrow> <mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><msub><mrow><mi>G</mi></mrow><mrow><mi>D</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mrow><mo fence="true" form="prefix"> ⌈</mo><mrow> <mfrac><mrow><mi mathvariant="italic">λO</mi></mrow>
+<mrow><mi>u</mi><msub><mrow><mi>v</mi></mrow><mrow><mi>D</mi></mrow></msub></mrow></mfrac> </mrow><mo fence="true" form="postfix">⌉</mo></mrow> <mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   This linear teaching model suppresses context-dependent cost, batch shape and EP group
+granularity. Its units are GPU equivalents, not deployable group sizes. Lab 23 assigns
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>λ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1024</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>O</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>64</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>P</mi> </mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2048</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>D</mi></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>128</mn></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>u</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0.8</mn></mrow></math>:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Capacity model (GPU equivalents, not deployment sizes):
+reused input fraction 0%: P=3, D=3
+reused input fraction 75%: P=1, D=3
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/23_service.txt">results/23_service.txt</a></div></div>
+<p class="indent">   The arithmetic moves prefill from three GPU equivalents to one. Output work
+stays at 256 tokens/s, so the decode estimate stays at three. That conclusion holds the
+arrival rate, output lengths and decode rate fixed. Faster prefill can still change when
+requests reach decode, as the opening experiment showed. It can also change achievable
+                                                                                  
+                                                                                  
+batching and latency. Production sizing cannot replace those effects with a constant
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>v</mi></mrow><mrow><mi>D</mi></mrow></msub></mrow></math>
+without checking the workload.
+</p><p class="indent">   The meaning of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math>
+matters. One hundred requests might all hit ten tokens of a thousand-token prompt: the request
+hit rate is 100%, but only 1% of input tokens are reused. The Q&amp;A sizes prefill from
+non-cached tokens and decode from running requests. It reports that shortening chatbot
+retention from seven days to about three costs 0.5–1% of KV-cache hit rate. It does not
+specify here whether that is a relative loss or a loss in percentage points, or give the
+corresponding uncached-token demand. Neither should be silently substituted into our formula
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   Matching is on the routing path; fetching has a different dependency. The Q&amp;A describes
+a separate process fetching block KV from 3FS into host shared memory, followed
+by an engine thread swapping it into device memory. Per-layer host-to-device copies
+can overlap forward computation once the needed state is ready. It describes using an
+RDMA network interface for these transfers through PCIe, avoiding GPU compute cores.
+This is a documented transfer design, not a path implemented by our queue simulator
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="state-lives-in-three-places"><span class="titlemark">11.3   </span> <a id="x1-17100011.3"></a>State lives in three places</h3>
+<p class="noindent">Chapter 4 separated block KV from per-request state. At service scale these objects also have
+different homes and failure modes (Table <a href="chapter-11.html#ref-tab:service-storage">11.2</a>).
+</p>
+<div class="table">
+<figure class="float" id="-storage-roles-reported-in-the-deployment-qa-saved-swa-is-never-stored-in-fs-it-is-not-an-additional-persistent-replica-of-block-kv"><a id="ref-tab:service-storage"></a>
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-46"><colgroup id="TBL-46-1g"><col id="TBL-46-1"/><col id="TBL-46-2"/><col id="TBL-46-3"/></colgroup><tr id="TBL-46-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-46-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Home</span> </p></td><td class="td11" id="TBL-46-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Contents and purpose</span> </p></td><td class="td10" id="TBL-46-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">What reuse depends on</span> </p></td>
+</tr><tr id="TBL-46-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-46-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Device
+memory</span> </p></td><td class="td11" id="TBL-46-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">In-flight block KV and live request
+  state</span> </p></td><td class="td10" id="TBL-46-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Active    engine    ownership    and
+  sufficient capacity</span> </p></td>
+</tr><tr id="TBL-46-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-46-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Host memory</span> </p></td><td class="td11" id="TBL-46-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">One copy of saved SWA state</span> </p></td><td class="td10" id="TBL-46-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">A  live  host  copy  and  a  directory
+  entry; remote copies can be fetched
+  over the 400G VLAN</span> </p></td>
+</tr><tr id="TBL-46-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-46-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">3FS storage</span> </p></td><td class="td11" id="TBL-46-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Persistent block KV for prefix reuse</span> </p></td><td class="td10" id="TBL-46-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">A surviving coded object that has
+  not been reclaimed</span> </p></td>
+</tr><tr id="TBL-46-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-46-5-1" style="text-align:left;"></td></tr></table></div><a id="x1-171001r2"></a>
+<figcaption class="caption"><span class="id">Table 11.2: </span><span class="content">Storage roles reported in the deployment Q&amp;A. Saved SWA is never stored in
+3FS; it is not an additional persistent replica of block KV.
+</span></figcaption>
+
+</figure>
+</div>
+<p class="indent">   The Entrypoint maintains an in-memory directory for the single host copy of SWA. A
+cross-machine hit pulls that state over the network. Host restart or eviction can therefore remove
+SWA while the block KV still exists. This is a normal trigger for chapter 9’s encoder replay,
+distinct from decoder replay on every truncated prefill. The Q&amp;A also says decode KV
+is written to storage for later reuse, but active decode does not use KV offloading
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="the-released-handoff-layout"><span class="titlemark">11.3.1   </span> <a id="x1-17200011.3.1"></a>The released handoff layout</h4>
+<p class="noindent">A completion engine needs enough state to continue immediately. A future prefix hit needs only
+the stored region; chapter 9 explained why consumer SWA can be dropped from that cache entry.
+The released helper exposes this distinction through <code>TO_CE</code>. In the branch without extra prefill
+state, selection is a contiguous slice:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.4.</b> Choose a live-handoff size or a stored-prefix size.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">790</span><span><span class="n">state_size</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">total_bytes_inference</span> <span class="k">if</span> <span class="n">TO_CE</span> <span class="k">else</span> <span class="bp">cls</span><span class="o">.</span><span class="n">state_size_to_disk</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">791</span><span><span class="k">if</span> <span class="n">state_size</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">792</span><span>    <span class="k">return</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">793</span><span><span class="n">src</span> <span class="o">=</span> <span class="n">state_cache</span><span class="p">[</span><span class="n">state_id</span><span class="p">,</span> <span class="p">:</span><span class="n">state_size</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">794</span><span><span class="k">if</span> <span class="n">state_tensor</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">795</span><span>    <span class="k">return</span> <span class="n">src</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">796</span><span><span class="n">state_tensor</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span><span class="n">src</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">797</span><span><span class="k">return</span> <span class="n">state_tensor</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L790-L797">deepinfer/worker/cache_engine.py</a> · lines 790–797</div></div>
+<p class="indent">   The live size, <code>total_bytes_inference</code>, includes the dropped region. The stored size,
+<code>state_size_to_disk</code>, names the prefix of that layout. Despite that identifier, the Q&amp;A says
+this saved SWA goes to host memory, not to 3FS. The returned slice can alias the
+cache when no destination is supplied. A transport driver would have to preserve its
+source until the transfer finishes, using the ownership reasoning from chapters 4 and
+6.
+</p><p class="indent">   When extra prefill state is enabled, the rings need rearranging. Selection allocates the
+appropriate destination and passes the handoff flag through to the view builder:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.5.</b> Select ring views for the chosen destination.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">799</span><span><span class="k">if</span> <span class="n">state_tensor</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">800</span><span>    <span class="n">state_size</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">total_bytes_inference</span> <span class="k">if</span> <span class="n">TO_CE</span> <span class="k">else</span> <span class="bp">cls</span><span class="o">.</span><span class="n">state_size_to_disk</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">801</span><span>    <span class="n">state_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">empty</span><span class="p">(</span><span class="n">state_size</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">state_cache</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">state_cache</span><span class="o">.</span><span class="n">device</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">802</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">803</span><span><span class="n">cache_views</span><span class="p">,</span> <span class="n">tensor_views</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_carve_state_views</span><span class="p">(</span><span class="n">state_id</span><span class="p">,</span> <span class="n">state_cache</span><span class="p">,</span> <span class="n">state_tensor</span><span class="p">,</span> <span class="n">TO_CE</span><span class="o">=</span><span class="n">TO_CE</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">804</span><span><span class="k">for</span> <span class="n">tensor_view</span><span class="p">,</span> <span class="n">cache_view</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">tensor_views</span><span class="p">,</span> <span class="n">cache_views</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">805</span><span>    <span class="k">if</span> <span class="n">tensor_view</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">806</span><span>        <span class="k">continue</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">807</span><span>    <span class="n">select_state_slice</span><span class="p">(</span><span class="n">tensor_view</span><span class="p">,</span> <span class="n">cache_view</span><span class="p">,</span> <span class="n">last_hit_position</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L799-L807">deepinfer/worker/cache_engine.py</a> · lines 799–807</div></div>
+<p class="indent">   Inside the following <code>if TO_CE </code>branch, consumer SWA has already been rearranged.
+The remaining compression state is copied separately. The comment at line 812 says:
+“Consumer SWA has been rearranged by ring; copy compression state directly” (author’s
+translation):
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.6.</b> Include the remaining dropped state for a CE.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">813</span><span><span class="n">dropped_compress_bytes</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">dropped_bytes_inference</span> <span class="o">-</span> <span class="bp">cls</span><span class="o">.</span><span class="n">swa_drop_total_bytes_inference_pad</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">814</span><span><span class="n">state_tensor</span><span class="p">[</span><span class="n">dropped_tensor_offset</span> <span class="p">:</span> <span class="n">dropped_tensor_offset</span> <span class="o">+</span> <span class="n">dropped_compress_bytes</span><span class="p">]</span><span class="o">.</span><span class="n">copy_</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">815</span><span>    <span class="n">state_cache</span><span class="p">[</span><span class="n">state_id</span><span class="p">,</span> <span class="n">dropped_cache_offset</span> <span class="p">:</span> <span class="n">dropped_cache_offset</span> <span class="o">+</span> <span class="n">dropped_compress_bytes</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">816</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L813-L816">deepinfer/worker/cache_engine.py</a> · lines 813–816</div></div>
+<p class="indent">   Loading a stored prefix into a prefill slot is a different operation. Its first check rejects <code>off</code>
+truncation when the model has dropped SWA layers:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.7.</b> Restore stored state, with a model-dependent guard.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">836</span><span><span class="k">if</span> <span class="bp">cls</span><span class="o">.</span><span class="n">swa_drop_num_layer</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">837</span><span>    <span class="k">assert</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE</span> <span class="o">!=</span> <span class="s2">"off"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">838</span><span><span class="k">if</span> <span class="ow">not</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_PREFILL_STORE_EXTRA_STATE</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">839</span><span>    <span class="k">if</span> <span class="bp">cls</span><span class="o">.</span><span class="n">state_size_to_disk</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">840</span><span>        <span class="k">return</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">841</span><span>    <span class="n">state_cache</span><span class="p">[</span><span class="n">state_id</span><span class="p">,</span> <span class="p">:</span> <span class="bp">cls</span><span class="o">.</span><span class="n">state_size_to_disk</span><span class="p">]</span> <span class="o">=</span> <span class="n">state_tensor</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">842</span><span>    <span class="k">return</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">843</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">844</span><span><span class="n">cache_views</span><span class="p">,</span> <span class="n">tensor_views</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">_carve_state_views</span><span class="p">(</span><span class="n">state_id</span><span class="p">,</span> <span class="n">state_cache</span><span class="p">,</span> <span class="n">state_tensor</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">845</span><span><span class="k">for</span> <span class="n">tensor_view</span><span class="p">,</span> <span class="n">cache_view</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">tensor_views</span><span class="p">,</span> <span class="n">cache_views</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">846</span><span>    <span class="k">if</span> <span class="n">tensor_view</span><span class="o">.</span><span class="n">numel</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">847</span><span>        <span class="k">continue</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">848</span><span>    <span class="n">load_state_to_cache</span><span class="p">(</span><span class="n">tensor_view</span><span class="p">,</span> <span class="n">cache_view</span><span class="p">,</span> <span class="n">last_hit_position</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/cache_engine.py#L836-L848">deepinfer/worker/cache_engine.py</a> · lines 836–848</div></div>
+<p class="indent">   The helper either copies the stored slice or reconstructs its ring views. It does not fetch
+bytes from another host, select a destination engine, or rebuild the dropped consumer
+state. In this release, calls to these two helpers outside <span class="path"><code>cache_engine.py</code></span> occur in
+<span class="path"><code>tests/worker/test_state_cache_ops.py</code></span>, not in a service driver <span class="cite">[<a href="references.html#Xdeepinfer-service-state">84</a>]</span>.
+</p><p class="indent">   That test also gives us a narrow, useful comparator. At lines 196–211 it selects state, changes
+the bytes, loads them back and selects again. The final comparison is:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.8.</b> The round-trip test compares the stored SWA payload.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">213</span><span><span class="n">reselected_swa</span> <span class="o">=</span> <span class="n">_stored_swa</span><span class="p">(</span><span class="n">reselected_state</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">214</span><span><span class="n">modified_swa</span> <span class="o">=</span> <span class="n">_stored_swa</span><span class="p">(</span><span class="n">modified_state</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">215</span><span><span class="k">assert</span> <span class="n">torch</span><span class="o">.</span><span class="n">equal</span><span class="p">(</span><span class="n">reselected_swa</span><span class="p">,</span> <span class="n">modified_swa</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/worker/test_state_cache_ops.py#L213-L215">tests/worker/test_state_cache_ops.py</a> · lines 213–215</div></div>
+<p class="indent"> <code>_stored_swa </code>excludes per-layer alignment padding before <code>torch.equal</code>. This checks a
+layout round trip for the tested configuration, not a network transfer or a full-model
+continuation. We inspected this CUDA test; the book’s standard-library labs do not execute
+it.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="retention-is-not-one-number"><span class="titlemark">11.3.2   </span> <a id="x1-17300011.3.2"></a>Retention is not one number</h4>
+<p class="noindent">A retention target, a capacity calculation and an eviction rule answer different questions. The
+Q&amp;A gives all three, listed in Table <a href="chapter-11.html#ref-tab:service-retention">11.3</a>. There TTL means time-to-live and LRU means least
+recently used.
+</p>
+<div class="table">
+<figure class="float" id="-numbers-and-policies-from-the-qa-not-interchangeable-guarantees"><a id="ref-tab:service-retention"></a>
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-49"><colgroup id="TBL-49-1g"><col id="TBL-49-1"/><col id="TBL-49-2"/></colgroup><tr id="TBL-49-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Reported quantity</span> </p></td><td class="td10" id="TBL-49-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Meaning in the deployment description</span> </p></td>
+</tr><tr id="TBL-49-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">More than 72 hours</span> </p></td><td class="td10" id="TBL-49-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">System goal for retaining reusable KV</span> </p></td>
+</tr><tr id="TBL-49-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">24 hours per server</span> </p></td><td class="td10" id="TBL-49-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Capacity-sizing recommendation alongside 20 SSDs of 30.73 TB each;
+  server count scales with deployment</span> </p></td>
+</tr><tr id="TBL-49-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">About 100 PiB SSD</span> </p></td><td class="td10" id="TBL-49-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Storage capacity of the described cluster</span> </p></td>
+</tr><tr id="TBL-49-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">3 days / 7 days</span> </p></td><td class="td10" id="TBL-49-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">TTL for agent / chatbot traffic</span> </p></td>
+</tr><tr id="TBL-49-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-6-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">LRU and watermark</span> </p></td><td class="td10" id="TBL-49-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Per-storage-node GC workers reclaim least recently used KV to keep
+  disk occupancy below a threshold</span> </p></td>
+</tr><tr id="TBL-49-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-49-7-1" style="text-align:left;"></td></tr></table></div><a id="x1-173001r3"></a>
+<figcaption class="caption"><span class="id">Table 11.3: </span><span class="content">Numbers and policies from the Q&amp;A, not interchangeable guarantees.
+</span></figcaption>
+
+</figure>
+</div>
+<p class="indent">   The Q&amp;A places expiry and reclamation in 3FS’s GC, with no expiry logic in kvcache-store
+itself. It does not give the complete precedence rules between age and occupancy pressure. A
+server sized for a day’s data does not by itself promise that every object will survive for that day,
+or that the whole cluster retains only a day <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   Durability and read latency are separate again. The Q&amp;A specifies 10+2 erasure coding,
+tolerating two simultaneous node failures, and says a read contacts 11 storage nodes and returns
+after any ten replies. Coding redundancy and read fan-out are different counts. The description
+does not explain why that read uses eleven nodes for twelve coded fragments; we do not infer a
+placement rule from those numbers. Nor does storage redundancy replicate the single host copy of
+SWA <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="a-hit-has-two-lengths"><span class="titlemark">11.4   </span> <a id="x1-17400011.4"></a>A hit has two lengths</h3>
+<p class="noindent">Suppose a prompt has <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi></mrow></math>
+tokens and block KV is available for a prefix of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>C</mi></mrow></math> tokens. The Q&amp;A caps a
+candidate hit at <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>134</mn></mrow></math>, then queries
+an aligned block-KV hit <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>L</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math>.
+Lab 24 makes the zero case explicit: </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mtable class="gathered"><mtr>
+<mtd><msub><mrow><mi>L</mi></mrow><mrow><mn>1</mn></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>128</mn> <mrow><mo fence="true" form="prefix"> ⌊</mo><mrow><mfrac><mrow><mtext class="qopname">min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mtext class="qopname">max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>L</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>134</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mi>C</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mn>128</mn></mrow></mfrac> </mrow><mo fence="true" form="postfix">⌋</mo></mrow><mo class="MathClass-punc" stretchy="false">,</mo></mtd>
+</mtr><mtr>
+<mtd><mi>H</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mrow><mo fence="true" form="prefix"> {</mo><mrow> <mtable align="axis" class="array" columnlines="none" displaystyle="true" equalcolumns="false" equalrows="false" style=""> <mtr class="array-row"><mtd class="array-td" columnalign="left"><msub><mrow><mi>L</mi></mrow><mrow><mn>1</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo> <mspace class="quad" width="1em"></mspace></mtd><mtd class="array-td" columnalign="left"><mstyle class="text"><mtext>qualifying SWA exists</mtext></mstyle><mo class="MathClass-punc" stretchy="false">,</mo></mtd>
+</mtr> </mtable> </mrow><mo fence="true" form="postfix"></mo></mrow></mtd>
+</mtr> </mtable>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>L</mi></mrow><mrow><mn>1</mn></mrow></msub></mrow></math> is the reusable
+block-KV length; <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>H</mi></mrow></math>
+is the length skipped by computation. The lab assumes a contiguous available prefix.
+An actual lookup must discover that prefix and whether the matching SWA state is
+present.
+                                                                                  
+                                                                                  
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/24_cache_hits.py
+</code></pre></div>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Assigned full block-prefix availability; columns count tokens
+L     block hit L1   compute hit: SWA present / missing
+128   0                 0 / 0
+261   0                 0 / 0
+262   128             128 / 0
+390   256             256 / 128
+902   768             768 / 640
+1024  768             768 / 640
+Checks: 69666 cases; bounds, alignment, backoff, monotonicity
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/24_cache_hits.txt">results/24_cache_hits.txt</a></div></div>
+<p class="indent">   For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>902</mn></mrow></math>,
+the cap is exactly 768. With SWA present, prefill starts at 768 and
+processes 134 new positions. Without it, prefill starts at 640. The interval
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>640</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>768</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+reconstructs encoder SWA; its block KV is already available and need not be rewritten. The
+remaining 134 positions are new. Calling both lengths simply “the hit” hides this distinction
+between reused bytes and avoided computation <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   The entire translated policy fits in six lines:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.9.</b> Compute block reuse and the computation restart.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">14</span><span><span class="k">def</span> <span class="nf">hit_lengths</span><span class="p">(</span><span class="n">length</span><span class="p">,</span> <span class="n">cached</span><span class="p">,</span> <span class="n">has_swa</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>    <span class="k">assert</span> <span class="n">length</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">cached</span> <span class="o">&gt;=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="n">cap</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">length</span> <span class="o">-</span> <span class="n">RESERVE</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="n">block_hit</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">cap</span><span class="p">,</span> <span class="n">cached</span><span class="p">)</span> <span class="o">//</span> <span class="n">BLOCK</span> <span class="o">*</span> <span class="n">BLOCK</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">18</span><span>    <span class="n">compute_hit</span> <span class="o">=</span> <span class="n">block_hit</span> <span class="k">if</span> <span class="n">has_swa</span> <span class="k">else</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">block_hit</span> <span class="o">-</span> <span class="n">BLOCK</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="k">return</span> <span class="n">block_hit</span><span class="p">,</span> <span class="n">compute_hit</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/24_cache_hits.py">labs/24_cache_hits.py</a> · lines 14–19</div></div>
+<p class="indent">   The checks enumerate aligned candidates independently and compare the result with the
+formula. They also verify nonnegative lengths, the cap, alignment, and a one-block
+backoff only when there is a positive hit and SWA is absent. Prompts shorter than
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>134</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>128</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>262</mn></mrow></math> cannot
+have a positive block hit under this policy. Monotonicity holds in the lab with cache extent and
+SWA availability fixed. It need not hold across changing directory entries in a live
+service.
+</p><p class="indent">   The same <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>L</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>902</mn></mrow></math>
+case exposes chapter 9’s integration gap. A 140-row retained suffix starts at 762, six positions
+before a hit at 768. Without an additional validity restriction, the released visibility formula can
+read those six consumer ring entries, but the stored-state restore does not fill them. Backing off
+after an SWA miss gives more rows; it does not resolve the SWA-present case. The numbers 128
+(window), 134 (default ring and documented hit reserve) and 140 (suggested keep
+count) retain different meanings. The released helper’s truncation guard narrows the
+allowed configurations, but does not disclose how the production driver reconciles the six
+entries. This experiment tests the Q&amp;A’s policy arithmetic, not that missing integration
+<span class="cite">[<a href="references.html#Xdeepinfer-service-state">84</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="balancing-scaling-and-failure"><span class="titlemark">11.5   </span> <a id="x1-17500011.5"></a>Balancing, scaling and failure</h3>
+<p class="noindent">The Q&amp;A describes four load-balancing concerns: prefill, decode, vision encoding and expert
+parallelism. Chapter 7 already traced the released EPLB statistics, policy and weight movement.
+At the service boundary, the remaining question is which engines should receive work and how
+many should exist.
+</p><p class="indent">   Prefill is divided by total context length into four tiers: below 16K, 16–64K, 64–256K and at
+least 256K. Each tier has a compute-quota cap. Engines pull requests according to remaining
+quota; within a DP group, new requests go to the rank with the least current quota load. The
+previous round’s share of quota demand controls how many engines each tier receives. These
+policies use the hit-derived work estimate, rather than sending every request with a given prefix
+to its old owner <span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   Decode has two load measures. A rank with few running requests might already hold
+a large total KV length. The documented policy sends short requests towards low
+concurrency even if that rank has much KV, and long requests towards small total
+KV length. This is where the Q&amp;A acknowledges DualPath’s intra-group scheduling.
+                                                                                  
+                                                                                  
+Counting requests alone would miss the context-reading cost from chapters 2 and 3
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   Autoscaling follows the same division: prefill demand is non-cached tokens; decode demand is
+running requests. The Q&amp;A adds rate limits, minimum and maximum sizes, spare quota
+and a rule forbidding scale-in above 0.8 quota utilisation. The capacity formula in lab
+23 explains the direction of change, not those production thresholds or their control
+loop.
+</p><p class="indent">   Scale-in and failure also have different contracts. On a planned shutdown a CE gets a
+one-minute grace period, then forwards unfinished requests and their KV in one transfer to other
+CEs. A crashed engine cannot promise to perform that handoff. The Q&amp;A instead
+describes quota redundancy and request rerouting; restarts take minutes. A failed GPU
+invalidates the whole instance’s EP communication domain. On restart, the platform forms
+an EP size from the healthy GPUs it can allocate. This describes recovery of service
+capacity, not evidence of uninterrupted, exactly identical output for an affected request
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+<h3 class="sectionHead" id="check-a-published-curve"><span class="titlemark">11.6   </span> <a id="x1-17600011.6"></a>Check a published curve</h3>
+<p class="noindent">Once stages have separate capacities, we need to choose their operating points. A decode
+configuration may serve each user more slowly while producing more tokens per GPU overall. The
+useful comparison is a <em>Pareto frontier</em>: the points for which no other tested point is at least as
+good on both axes and strictly better on one.
+</p><p class="indent">   The fixed release has three performance figures under <span class="path"><code>doc/images/</code></span>: <span class="path"><code>decode_pareto.png</code></span>,
+<span class="path"><code>prefill_pareto.png</code></span> and <span class="path"><code>wide_ep_decode_pareto.png</code></span>. It supplies a sweep script and plotting
+code, but no raw <span class="path"><code>results.jsonl</code></span>. The sweep creates that file when run. We can inspect the
+conversion and read an approximate point from the image; we cannot reanalyse absent raw
+measurements <span class="cite">[<a href="references.html#Xdeepinfer-service-curves">85</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="build-a-frontier-from-known-data"><span class="titlemark">11.6.1   </span> <a id="x1-17700011.6.1"></a>Build a frontier from known data</h4>
+<p class="noindent">Lab 25 uses explicitly assigned request counts and step rates. It includes a poor operating point
+at 48 requests so that connecting all points differs from selecting a frontier:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/25_frontier.py
+</code></pre></div>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Synthetic records: requests, steps/s, user tokens/s, tokens/s/GPU
+ 8 100 325.00 2600.00
+16  90 292.50 4680.00
+32  60 195.00 6240.00
+48  35 113.75 5460.00
+64  40 130.00 8320.00
+Non-dominated request counts: [8, 16, 32, 64]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/25_frontier.txt">results/25_frontier.txt</a></div></div>
+<p class="indent">   Both axes prefer larger values. The 48-request point gives 113.75 tokens/s/user and 5,460
+tokens/s/GPU. The 32-request point improves both to 195 and 6,240. The lab removes the former
+from the frontier, as Figure <a href="chapter-11.html#ref-fig:service-frontier">11.2</a> shows. Its assigned step rate also rises between 48
+and 64 requests; these records are a deliberate counterexample, not a fitted hardware
+curve.
+</p>
+<figure class="figure"><a id="ref-fig:service-frontier"></a>
+<p class="noindent" id="-a-frontier-calculated-by-lab-labels-are-requests-per-dp-rank-cp-is-one-these-are-assigned-rates-not-the-published-benchmark-points"><a aria-label="Open figure at full size" class="figure-image" href="webbook27x.svg" rel="noopener" target="_blank"><img alt="Figure 11.2: A frontier calculated by lab 25. Labels are requests per DP rank; CP is one.
+These are assigned rates, not the published benchmark points." loading="lazy" src="webbook27x.svg"/></a>
+<a id="x1-177001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 11.2: </span><span class="content">A frontier calculated by lab 25. Labels are requests per DP rank; CP is one.
+These are assigned rates, not the published benchmark points.
+</span></figcaption>
+
+</figure>
+<p class="indent">   The released plotting script does something simpler: <code>load_points </code>retains the latest record at
+each scanned request count and checks a set of fixed configuration fields. Then line 150 plots all
+selected points in scan order. It does not calculate non-dominance or combine repeated runs
+statistically. A curve called “Pareto” still needs its points and assumptions examined
+<span class="cite">[<a href="references.html#Xdeepinfer-service-curves">85</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="the-two-meanings-of-acceptance"><span class="titlemark">11.6.2   </span> <a id="x1-17800011.6.2"></a>The two meanings of acceptance</h4>
+<p class="noindent">Chapter 2 established how to turn step rate into useful output. The decode plot makes that
+conversion explicit:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 11.10.</b> Both plotted rates use the supplied tokens-per-step factor.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">66</span><span><span class="n">xs</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="p">[</span><span class="s2">"decode_avg_sps"</span><span class="p">]</span> <span class="o">*</span> <span class="n">tau</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">points</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">67</span><span><span class="n">ys</span> <span class="o">=</span> <span class="p">[</span><span class="n">p</span><span class="p">[</span><span class="s2">"decode_avg_sps"</span><span class="p">]</span> <span class="o">*</span> <span class="n">p</span><span class="p">[</span><span class="s2">"decode_num_requests"</span><span class="p">]</span> <span class="o">*</span> <span class="n">tau</span> <span class="o">/</span> <span class="n">p</span><span class="p">[</span><span class="s2">"cp"</span><span class="p">]</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">points</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">68</span><span><span class="k">return</span> <span class="n">xs</span><span class="p">,</span> <span class="n">ys</span><span class="p">,</span> <span class="p">[</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">p</span><span class="p">[</span><span class="s1">'decode_num_requests'</span><span class="p">]</span><span class="si">:</span><span class="s2">,</span><span class="si">}</span><span class="s2">"</span> <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">points</span><span class="p">]</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/sweep/plot_pareto.py#L66-L68">examples/sweep/plot_pareto.py</a> · lines 66–68</div></div>
+<p class="indent">   Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>R</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">decode_num_requests</mtext></mstyle></mrow></math> is
+per DP rank, and SPS is the measured decode steps per second, <code>decode_avg_sps</code>. The horizontal rate is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle mathvariant="normal"><mi>SPS</mi></mstyle><mspace class="thinspace" width="0.17em"></mspace><mi>τ</mi></mrow></math>; the vertical
+rate is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>y</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mstyle mathvariant="normal"><mi>SPS</mi></mstyle><mspace class="thinspace" width="0.17em"></mspace><mi mathvariant="italic">Rτ</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mstyle mathvariant="normal"><mi>CP</mi></mstyle></mrow></math>.
+For the published decode figure, EP and DP are both 64, context length
+is 131,072, and <code>nextn=3 </code>is fixed. Its subtitle supplies 75% acceptance and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3.25</mn></mrow></math>. The script
+calculates <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mstyle class="text"><mtext class="texttt" mathvariant="monospace">nextn</mtext></mstyle><mo class="MathClass-bin" stretchy="false">×</mo> <mi>a</mi></mrow></math>
+at line 61 and rejects variable-length mode at line 60. The acceptance value is an input to the
+plot, not an acceptance measurement in these records <span class="cite">[<a href="references.html#Xdeepinfer-service-curves">85</a>]</span>.
+</p><p class="indent">   There are two plausible meanings of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>.
+If it means the mean number of accepted draft tokens divided by three, then
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>3</mn><mi>a</mi></mrow></math> is
+precisely the intended conversion, ignoring end-of-request clipping. But if it means a conditional
+acceptance probability of 0.75 at each successive draft position, chapter 8’s accepted-prefix rule
+gives </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle mathvariant="normal"><mi>E</mi></mstyle><mo class="MathClass-open" stretchy="false">[</mo><mstyle class="text"><mtext>accepted drafts</mtext></mstyle><mo class="MathClass-close" stretchy="false">]</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>a</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <msup><mrow><mi>a</mi></mrow><mrow><mn>2</mn></mrow></msup> <mo class="MathClass-bin" stretchy="false">+</mo> <msup><mrow><mi>a</mi></mrow><mrow><mn>3</mn></mrow></msup> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0.75</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.5625</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.421875</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1.734375</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2.734375</mn><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The second and third positions count only when all preceding draft tokens were accepted.
+Equal conditional probabilities suffice for this product; the lab uses independent Bernoulli draws
+as a simple exact enumeration of that case. One main-model token is included per step, with no
+early EOS in this model.
+                                                                                  
+                                                                                  
+</p><p class="indent">   Lab 25 uses rational arithmetic to enumerate all eight acceptance patterns. The conversion
+results and the separate approximate image reading are:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Mean accepted fraction 0.75: tau=3.250000
+Conditional acceptance 0.75: tau=2.734375
+Common axis shrink: 15.8654%
+Published point, approximate: 246 / 3.25 = 75.69 steps/s
+Implied throughput at R=64, CP=1: 15744 tokens/s/GPU
+Checks: exact prefix expectation and common-scale frontier passed
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/25_frontier.txt">results/25_frontier.txt</a></div></div>
+<p class="indent">   The ratio <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2.734375</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3.25</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>175</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>208</mn></mrow></math>
+shrinks both axes by about 15.9%. It preserves their relative order and which points are
+dominated if the same factor applies everywhere. If acceptance changes with workload or
+configuration, point-specific factors can change the frontier itself. The subtitle’s phrase “per-token
+acceptance” does not settle the definition, so this calculation identifies an assumption to check
+rather than proving that the figure is wrong.
+</p>
+<h4 class="subsectionHead" id="recover-a-step-rate-specify-the-missing-measurement"><span class="titlemark">11.6.3   </span> <a id="x1-17900011.6.3"></a>Recover a step rate; specify the missing measurement</h4>
+<p class="noindent">The published 64-request point is approximately 246 tokens/s/user, read from the image rather than a raw record.
+Under the figure’s <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3.25</mn></mrow></math>,
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mstyle mathvariant="normal"><mi>SPS</mi></mstyle> <mo class="MathClass-rel" stretchy="false">≃</mo> <mfrac><mrow><mn>246</mn></mrow>
+<mrow><mn>3.25</mn></mrow></mfrac> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>75</mn><mo class="MathClass-punc" stretchy="false">.</mo><mn>69</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>y</mi> <mo class="MathClass-rel" stretchy="false">≃</mo> <mn>75</mn><mo class="MathClass-punc" stretchy="false">.</mo><mn>69</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>64</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>3.25</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>15</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>744</mn><mspace class="quad" width="1em"></mspace><mstyle class="text"><mtext>tokens/s/GPU</mtext></mstyle><mo class="MathClass-punc" stretchy="false">,</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   using CP=1. That agrees with the plotted point near 15,750. It is not the throughput of the
+entire 64-GPU instance. The image hash and fixed revision are recorded separately in the source
+manifest; the reading remains approximate.
+</p><p class="indent">   Neither decode axis is a latency percentile. The reciprocal of user speed is an amortised time
+per output token; speculative steps can publish several tokens together. It does not reveal the
+gaps between bursts, queueing, or time to first token. The prefill figure uses mean measured step
+duration on its horizontal axis, which also omits a request’s earlier waits. Chapter 2’s request
+trace is the appropriate model for those quantities.
+</p><p class="indent">   A measurement capable of changing the conclusion would record useful emitted tokens
+per request-step under the same model, prompt histories, sampling parameters and
+fixed draft length. It should count early termination and rejected drafts, then estimate
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math> at each
+concurrency instead of supplying one acceptance number. Keep raw records and token timestamps so that
+steady-state rates and end-to-end gaps remain distinguishable. First this checks the figure’s absolute
+scale; varying <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math>
+by point also tests its ordering.
+</p><p class="indent">   The Wide-EP comparison needs a second control: repeat EP8 and EP64 on matched hardware
+and workload definitions, recording topology, model and dependency revisions, expert redundancy
+and the actual acceptance factor. Compare their frontiers at the same per-user target and
+per-GPU denominator, not merely at the same total request count. A different mapping from step
+                                                                                  
+                                                                                  
+rate to useful output could change the observed advantage. So could service queueing absent from
+the offline benchmark. This is a proposed measurement, not a result of our synthetic
+records.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next10"><span class="titlemark">11.7   </span> <a id="x1-18000011.7"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-180002x1">In lab 23, use one decode worker instead of two. Predict which prefill saving survives
+     in final completion time, then run your change. Identify the queue that absorbs the
+     saved time.
+     </li>
+<li class="enumerate" id="x1-180004x2">Extend the local-cache case with a choice to recompute on the idle worker. Which
+     hit lengths make affinity preferable under the assigned costs? State whether your
+     objective is first completion, last completion or mean wait.
+     </li>
+<li class="enumerate" id="x1-180006x3">For a 902-token prompt, explain the different meanings of 768, 640 and 134 in lab 24.
+     How many positions rebuild SWA when it is missing? Which block KV can still be
+     reused? Why does this not resolve the 140-row keep setting?
+     </li>
+<li class="enumerate" id="x1-180008x4">A capacity estimate uses the fraction of requests with any cache hit as <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>h</mi></mrow></math>.
+     Construct  two  workloads  with  that  same  fraction  but  different  uncached-token
+     demand. Which measurement must replace it?
+     </li>
+<li class="enumerate" id="x1-180010x5">Change acceptance for just one synthetic operating point in lab 25. Can the set
+     of non-dominated points change? Give the counts needed to measure that point’s
+     <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>τ</mi></mrow></math>,
+     including your treatment of completed requests.
+     </li>
+<li class="enumerate" id="x1-180012x6">Choose a service claim from Table <a href="chapter-11.html#ref-tab:service-release">11.1</a>. Locate the code, public project or Q&amp;A
+     passage that supports it, and name one observation needed to test its production
+     behaviour.</li></ol>
+
+<h3 class="sectionHead" id="one-request-end-to-end"><span class="titlemark">11.8   </span> <a id="x1-18100011.8"></a>One request, end to end</h3>
+<p class="noindent">Follow request A with a 300-token prompt through the released offline path. Use a NORMAL
+engine, CP=1, ZOS enabled and fixed verification with <code>nextn=5</code>. Leave chunked prefill, YOCO
+truncation and structured output off. Assume enough free memory, no prefix hit or preemption,
+and an output limit that does not interrupt the steps below. Experts occupy the configured EP
+group; other requests keep decode calls running after A finishes. The lengths and acceptance
+outcome below are assigned to illustrate the inspected branches, not recorded engine
+output.
+</p>
+<h4 class="subsectionHead" id="admit-the-prompt-and-create-the-first-output"><span class="titlemark">11.8.1   </span> <a id="x1-18200011.8.1"></a>Admit the prompt and create the first output</h4>
+<p class="noindent"><code>LLM.generate </code>admits A as a persistent <code>Sequence </code>in the waiting queue.
+When the scheduler selects its prompt, A receives three paged blocks,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mn>300</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>128</mn><mo class="MathClass-close" stretchy="false">⌉</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>, and a
+state slot. The block table locates compressed KV and index rows; the slot holds SWA and live
+compression state. No other request owns these allocations in this case (chapters 1, 4 and
+5).
+</p><p class="indent">   The worker sends the 300 prompt positions through embeddings and the model
+layers. Attention writes and reads the layer’s cache views; MoE sends each position’s
+expert work to the selected slots and returns the weighted results (chapters 3 and 7).
+Sampling uses the last prompt position’s representation to choose A’s first output. Prompt
+post-processing happens in the same worker call. The processed count is now 300, while
+token history has length 301. The output at position 300 still needs to become a model
+input.
+</p>
+<h4 class="subsectionHead" id="follow-one-sixposition-decode-step"><span class="titlemark">11.8.2   </span> <a id="x1-18300011.8.2"></a>Follow one six-position decode step</h4>
+<p class="noindent">After further decode work, choose a step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>
+whose inputs begin at position 320 and include five available drafts. During call
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>, the host
+processes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>:
+A’s committed count becomes 320 and its history length 321. Forward
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> is
+already queued. Its six queries occupy positions 320–325, with key length 326. For example,
+position 320 lies in A’s third logical block at token-position offset 64; the block table supplies the
+physical block ID.
+                                                                                  
+                                                                                  
+</p><p class="indent">   Assume verification accepts the first two drafts and rejects the third. The accepted prefix and
+its replacement contribute three output tokens. The six evaluated positions therefore
+advance the committed count by three, not six. The last output remains unprocessed:
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-53"><colgroup id="TBL-53-1g"><col id="TBL-53-1"/><col id="TBL-53-2"/><col id="TBL-53-3"/></colgroup><tr id="TBL-53-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-53-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Host post-processing milestone</span> </p></td><td class="td11" id="TBL-53-1-2" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">Processed positions  </span></td><td class="td10" id="TBL-53-1-3" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">History length</span></td>
+</tr><tr id="TBL-53-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-53-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Prompt completes</span> </p></td><td class="td11" id="TBL-53-2-2" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">300  </span></td><td class="td10" id="TBL-53-2-3" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">301</span></td>
+</tr><tr id="TBL-53-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-53-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Step </span><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math><span class="ec-lmr-10">,
+during call </span><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> </p> </td><td class="td11" id="TBL-53-3-2" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">320  </span></td><td class="td10" id="TBL-53-3-3" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">321</span></td>
+</tr><tr id="TBL-53-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-53-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Step </span><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math><span class="ec-lmr-10">,
+during call </span><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> </p> </td><td class="td11" id="TBL-53-4-2" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">323  </span></td><td class="td10" id="TBL-53-4-3" style="text-align:right; white-space:nowrap;"> <span class="ec-lmr-10">324</span></td>
+</tr><tr id="TBL-53-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-53-5-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   Before that last update, scheduling <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+sees 320 committed positions, six in flight and six new queries: an upper-bound
+key length of 332. On the device, the previous accepted count removes
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>5</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>2</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>, giving
+329. The new queries actually cover positions 323–328. Their main input and drafts come from
+step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>’s
+device output via the request remap, even though the host does not yet know them (chapters 6
+and 8). The three blocks still suffice. Discarded draft bytes may remain in storage; counts and
+visibility decide which rows can be read (chapter 4).
+</p><p class="indent">   Only after queuing forward <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+does the worker wait for <code>sample_end_evt(N) </code>and post-process those three outputs. The
+entrypoint clones the returned pooled records while their addresses remain valid. Counting the six
+queries as six useful outputs would double this step’s progress; timing submission alone would
+miss the wait and publication boundary (chapters 1 and 2).
+</p>
+<h4 class="subsectionHead" id="finish-then-change-the-boundary"><span class="titlemark">11.8.3   </span> <a id="x1-18400011.8.3"></a>Finish, then change the boundary</h4>
+<p class="noindent">Suppose a later step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi></mrow></math>
+produces EOS. Call <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+has already queued A’s extra forward before post-processing marks it finished. In call
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn></mrow></math>,
+scheduling removes A; post-processing waits for the obsolete
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>M</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+work and skips its output; <code>pre_sampler_sync </code>then releases A’s remaining storage.
+Other requests keep these decode calls consecutive, as assumed in chapter 6’s trace. At
+the eventual end of the whole generation loop, the final flush drains the remaining
+in-flight result. Request completion, output collection and storage release are distinct
+events.
+</p><p class="indent">   Two changes connect this trace to the remaining chapters. Enabling compact prefill would
+introduce chapter 9’s full-source and retained-query layouts; agreement with mask would still not
+prove agreement with this untruncated baseline. Moving A to a disaggregated service would
+introduce prefix matching, PE selection and a PE-to-CE state handoff. The CE needs the
+live state extent, including the dropped region; the released layout helper does not
+                                                                                  
+                                                                                  
+implement that transport. These are changes to the case, not hidden steps in its offline
+execution.
+</p><p class="indent">   Finally, choose the comparator before testing either change. Chapter 10’s golden trajectory
+can hold A’s tokens fixed for a numerical comparison; independently sampled outputs
+answer a different question. This single request now gives us both a route through
+the code and a way to investigate it: name the owner, locate the processed boundary,
+identify the completion condition, and state which observable a proposed change must
+preserve.
+                                                                                  
+                                                                                  
+</p><p class="indent">
+<a id="x1-184001r194"></a>
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-10.html"><small>PREVIOUS</small>← Different correctness contracts</a><a class="next" href="appendix-a.html"><small>NEXT</small>Compression and indexing →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#a-request-crosses-several-owners">11.1 A request crosses several owners</a><a class="" href="#hits-decide-prefill-demand">11.2 Hits decide prefill demand</a><a class="toc-sub" href="#from-work-to-a-capacity-estimate">11.2.1 From work to a capacity estimate</a><a class="" href="#state-lives-in-three-places">11.3 State lives in three places</a><a class="toc-sub" href="#the-released-handoff-layout">11.3.1 The released handoff layout</a><a class="toc-sub" href="#retention-is-not-one-number">11.3.2 Retention is not one number</a><a class="" href="#a-hit-has-two-lengths">11.4 A hit has two lengths</a><a class="" href="#balancing-scaling-and-failure">11.5 Balancing, scaling and failure</a><a class="" href="#check-a-published-curve">11.6 Check a published curve</a><a class="toc-sub" href="#build-a-frontier-from-known-data">11.6.1 Build a frontier from known data</a><a class="toc-sub" href="#the-two-meanings-of-acceptance">11.6.2 The two meanings of acceptance</a><a class="toc-sub" href="#recover-a-step-rate-specify-the-missing-measurement">11.6.3 Recover a step rate; specify the missing measurement</a><a class="" href="#experiments-to-try-next10">11.7 Experiments to try next</a><a class="" href="#one-request-end-to-end">11.8 One request, end to end</a><a class="toc-sub" href="#admit-the-prompt-and-create-the-first-output">11.8.1 Admit the prompt and create the first output</a><a class="toc-sub" href="#follow-one-sixposition-decode-step">11.8.2 Follow one six-position decode step</a><a class="toc-sub" href="#finish-then-change-the-boundary">11.8.3 Finish, then change the boundary</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

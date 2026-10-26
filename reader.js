@@ -1,6 +1,13 @@
 // The pages, figures and mathematics also work with JavaScript disabled.
 const menu = document.querySelector('.mobile-menu');
 if (window.matchMedia('(max-width: 780px)').matches) menu.open = false;
+else {
+  const rail = document.querySelector('.book-nav');
+  const active = rail.querySelector('[aria-current="page"]');
+  if (active && active.offsetTop > rail.clientHeight - 100) {
+    rail.scrollTop = active.offsetTop - rail.clientHeight / 2;
+  }
+}
 
 for (const button of document.querySelectorAll('.copy-code')) {
   button.addEventListener('click', async () => {

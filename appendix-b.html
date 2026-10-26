@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Repository and execution map · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link active" href="appendix-b.html" aria-current="page"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">APPENDIX B</p><h1 class="appendixHead" id="repository-and-execution-map"><a id="x1-197000B"></a>Repository and execution map</h1>
+<p class="noindent"><a id="ref-app:map"></a>
+</p><p class="indent">   The chapters organise DeepInfer by mechanisms. This appendix organises the same
+implementation by processes, call boundaries and directories. Use it to choose a starting symbol,
+then return to the chapter that explains its behaviour. Line anchors refer to the pinned edition in
+Appendix <a href="appendix-c.html#ref-app:sources">C</a>.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-15">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">On four devices, how can one configuration have four engine drivers and another have
+two drivers, while both have four device workers? Does adding expert parallelism
+create another pool of processes? </p>
+</div>
+</div>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/28_ranks.py
+</code></pre></div>
+<p class="indent">   DP, CP and EP mean data, context and expert parallelism. The lab translates rank
+arithmetic; it starts no workers. DP4/CP1 gives four drivers, each using one device.
+DP2/CP2 gives two drivers, each with one spawned CP follower. EP4 groups those same
+four device workers in both configurations. For DP2/CP2 the computed memberships
+are:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>DP groups: [[0, 2], [1, 3]]
+CP groups: [[0, 1], [2, 3]]
+EP groups: [[0, 1, 2, 3]]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/28_ranks.txt">results/28_ranks.txt</a></div></div>
+<p class="indent">   The grouping arithmetic in the lab is small enough to inspect directly:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing B.1.</b> Three groupings over one set of ranks.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">10</span><span><span class="k">def</span> <span class="nf">layout</span><span class="p">(</span><span class="n">dp</span><span class="p">,</span> <span class="n">cp</span><span class="p">,</span> <span class="n">ep</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">11</span><span>    <span class="n">world</span> <span class="o">=</span> <span class="n">dp</span> <span class="o">*</span> <span class="n">cp</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span>    <span class="k">assert</span> <span class="n">world</span> <span class="o">%</span> <span class="n">ep</span> <span class="o">==</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">13</span><span>    <span class="n">workers</span> <span class="o">=</span> <span class="p">[(</span><span class="n">e</span> <span class="o">*</span> <span class="n">cp</span> <span class="o">+</span> <span class="n">c</span><span class="p">,</span> <span class="n">e</span><span class="p">,</span> <span class="n">c</span><span class="p">,</span> <span class="s2">"driver"</span> <span class="k">if</span> <span class="n">c</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="s2">"child"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">14</span><span>               <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">dp</span><span class="p">)</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cp</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">15</span><span>    <span class="n">dp_groups</span> <span class="o">=</span> <span class="p">[[</span><span class="n">e</span> <span class="o">*</span> <span class="n">cp</span> <span class="o">+</span> <span class="n">c</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">dp</span><span class="p">)]</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cp</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">16</span><span>    <span class="n">cp_groups</span> <span class="o">=</span> <span class="p">[[</span><span class="n">e</span> <span class="o">*</span> <span class="n">cp</span> <span class="o">+</span> <span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cp</span><span class="p">)]</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">dp</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">17</span><span>    <span class="n">ep_groups</span> <span class="o">=</span> <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">start</span><span class="p">,</span> <span class="n">start</span> <span class="o">+</span> <span class="n">ep</span><span class="p">))</span> <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">world</span><span class="p">,</span> <span class="n">ep</span><span class="p">)]</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/28_ranks.py">labs/28_ranks.py</a> · lines 10–17</div></div>
+<p class="indent">   Thus DP, CP and EP describe different groupings of the same workers. They are not three
+process pools to add together. The following map assumes one node, zero device offset and no
+extra Engram replicas. Production choices in the Q&amp;A are a separate configuration, discussed in
+chapter 11.
+</p>
+<h3 class="sectionHead" id="processes-devices-and-communication-groups"><span class="titlemark">B.1   </span> <a id="x1-198000B.1"></a>Processes, devices and communication groups</h3>
+<p class="noindent">The example launcher <span class="path"><code>examples/_launch.py</code></span>:26, <code>run_dp</code>, starts one process
+per engine rank assigned to the node (or uses the current process for one engine).
+Its <code>RANK</code>/<code>WORLD_SIZE </code>select the node’s share of those ranks. Within each engine,
+<span class="path"><code>deepinfer/engine/llm_engine.py</code></span>:368, <code>_init_workers</code>, spawns CP ranks 1 through
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>C</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>. CP
+rank zero is a <code>Worker </code>in the engine process itself. The engine’s Python controller is therefore not
+an additional device worker <span class="cite">[<a href="references.html#Xdeepinfer-atlas-processes">94</a>]</span>.
+</p><p class="indent"> <code>WorkerBase </code>in <span class="path"><code>deepinfer/worker/base.py</code></span>:79 assigns </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>g</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi mathvariant="italic">eC</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>c</mi><mo class="MathClass-punc" stretchy="false">,</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>e</mi></mrow></math> is
+engine rank, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>C</mi></mrow></math>
+is CP size and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>c</mi></mrow></math>
+is CP rank. The example factory’s <code>setup_cuda_visible_devices </code>assigns each engine its
+contiguous slice of devices; within that slice a worker uses its local index. Figure <a href="appendix-b.html#ref-fig:atlas-ranks">B.1</a> shows the
+two example layouts with four local devices and no offset.
+</p>
+<figure class="figure"><a id="ref-fig:atlas-ranks"></a>
+<p class="noindent" id="-four-device-workers-in-either-configuration-lowerrow-arrows-show-drivertofollower-control-within-a-cp-group-ep-includes-all-four-ranks-in-each-case-it-does-not-add-processes"><a aria-label="Open figure at full size" class="figure-image" href="webbook29x.svg" rel="noopener" target="_blank"><img alt="Figure B.1: Four  device  workers  in  either  configuration.  Lower-row  arrows  show
+driver-to-follower control within a CP group. EP includes all four ranks in each case; it does
+not add processes." loading="lazy" src="webbook29x.svg"/></a>
+<a id="x1-198001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure B.1:  </span><span class="content">Four  device  workers  in  either  configuration.  Lower-row  arrows  show
+driver-to-follower control within a CP group. EP includes all four ranks in each case; it does
+not add processes.
+</span></figcaption>
+
+</figure>
+<p class="indent"> <code>ParallelProcessGroup.create_process_groups </code>builds DP groups across engines at a fixed
+CP position, CP groups within an engine, and contiguous EP groups:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing B.2.</b> Group the existing ranks along different dimensions.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">91</span><span><span class="c1"># DP group</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">92</span><span><span class="n">dp_ranks</span> <span class="o">=</span> <span class="n">rearrange</span><span class="p">(</span><span class="n">ranks</span><span class="p">,</span> <span class="s2">"(replica dp cp) -&gt; (replica cp) dp"</span><span class="p">,</span> <span class="n">dp</span><span class="o">=</span><span class="n">dp_size</span><span class="p">,</span> <span class="n">cp</span><span class="o">=</span><span class="n">cp_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">93</span><span><span class="bp">self</span><span class="o">.</span><span class="n">dp</span> <span class="o">=</span> <span class="n">_split_group</span><span class="p">(</span><span class="n">dp_ranks</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">,</span> <span class="n">pg_options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">94</span><span><span class="bp">self</span><span class="o">.</span><span class="n">cpu_dp_group</span> <span class="o">=</span> <span class="n">_split_group</span><span class="p">(</span><span class="n">dp_ranks</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">"gloo"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">95</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">96</span><span><span class="c1"># CP group</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">97</span><span><span class="n">cp_ranks</span> <span class="o">=</span> <span class="n">rearrange</span><span class="p">(</span><span class="n">ranks</span><span class="p">,</span> <span class="s2">"(dp cp) -&gt; dp cp"</span><span class="p">,</span> <span class="n">cp</span><span class="o">=</span><span class="n">cp_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">98</span><span><span class="bp">self</span><span class="o">.</span><span class="n">cp</span> <span class="o">=</span> <span class="n">_split_group</span><span class="p">(</span><span class="n">cp_ranks</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">,</span> <span class="n">pg_options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">99</span><span><span class="bp">self</span><span class="o">.</span><span class="n">cpu_cp_group</span> <span class="o">=</span> <span class="n">_split_group</span><span class="p">(</span><span class="n">cp_ranks</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">"gloo"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">100</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">101</span><span><span class="c1"># EP groups: contiguous groups of ep_size ranks.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span><span class="k">if</span> <span class="n">ep_size</span> <span class="o">==</span> <span class="n">ranks</span><span class="o">.</span><span class="n">numel</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">103</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">ep</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">world</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">104</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">105</span><span>    <span class="n">ep_ranks</span> <span class="o">=</span> <span class="n">rearrange</span><span class="p">(</span><span class="n">ranks</span><span class="p">,</span> <span class="s2">"(edp ep) -&gt; edp ep"</span><span class="p">,</span> <span class="n">ep</span><span class="o">=</span><span class="n">ep_size</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">106</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">ep</span> <span class="o">=</span> <span class="n">_split_group</span><span class="p">(</span><span class="n">ep_ranks</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span> <span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">,</span> <span class="n">pg_options</span><span class="o">=</span><span class="n">options</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/parallel_state.py#L91-L106">deepinfer/model_executor/parallel_utils/parallel_state.py</a> · lines 91–106</div></div>
+<p class="indent">   For DP2/CP2, this produces DP groups <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, CP
+groups <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, and the
+EP group <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+The membership formula is distinct from a workload split: CP workers cooperate on the same
+engine’s requests, whereas DP engines admit different requests. EP determines where experts
+run.
+</p><p class="indent">   Within a CP group, the query rows of each sequence are divided by a mirrored, or zigzag, rule. The
+reference expansion in <span class="path"><code>model_executor/layers/tilelang_ops/prepare_cp_mirror.py</code></span>, lines 135–146, cuts
+a sequence of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math>
+rows into <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mi>C</mi></mrow></math>
+pieces of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">⌈</mo><mi>q</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mi>C</mi><mo class="MathClass-close" stretchy="false">⌉</mo></mrow></math>
+rows; rank <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi></mrow></math>
+takes pieces <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>r</mi></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mi>C</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>r</mi></mrow></math>. With
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>C</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn></mrow></math> and eight rows,
+rank 0 holds rows 0–1 and 6–7, while rank 1 holds rows 2–5. This is why the scheduler rounds prefill workloads
+to <code>cp_align</code><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-rel" stretchy="false">=</mo> <mn>2</mn><mi>C</mi></mrow></math>
+(<span class="path"><code>csrc/engine/scheduler.hpp</code></span>:90; chapter 5). Under causal attention, later rows read more
+context, so pairing an early piece with a late one plausibly evens out the work. That is our
+reading of the README’s “balanced CP”, not a measured balance <span class="cite">[<a href="references.html#Xdeepinfer-atlas-processes">94</a>]</span>.
+</p><p class="indent">   The general configuration is broader. <span class="path"><code>deepinfer/config.py</code></span>:150, <code>ParallelConfig</code>, allows
+Engram parallelism to enlarge the world; the world size is the maximum of that size and DP
+times CP. The lab deliberately excludes those replicas. CPU control groups and shared-memory
+queues also exist. Their transport implementation and all distributed failure paths are not
+covered here <span class="cite">[<a href="references.html#Xdeepinfer-atlas-processes">94</a>]</span>.
+</p>
+<h3 class="sectionHead" id="follow-one-step-into-computation"><span class="titlemark">B.2   </span> <a id="x1-199000B.2"></a>Follow one step into computation</h3>
+<p class="noindent">Figure <a href="appendix-b.html#ref-fig:atlas-control">B.2</a> is a call-boundary map, not an elapsed-time chart. The scheduler returns work to the
+engine. It does not call the model runner. The worker separately launches main-model execution
+and sampling.
+</p>
+<figure class="figure"><a id="ref-fig:atlas-control"></a>
+<p class="noindent" id="-control-and-computation-the-enginescheduler-boundary-is-a-pybind-call-and-return-the-worker-controls-both-launches-under-zos-previousstep-postprocessing-occurs-between-them"><a aria-label="Open figure at full size" class="figure-image" href="webbook30x.svg" rel="noopener" target="_blank"><img alt="Figure B.2: Control and computation. The engine/scheduler boundary is a pybind call and
+return. The worker controls both launches; under ZOS, previous-step post-processing occurs
+between them." loading="lazy" src="webbook30x.svg"/></a>
+<a id="x1-199001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure B.2: </span><span class="content">Control and computation. The engine/scheduler boundary is a pybind call and
+return. The worker controls both launches; under ZOS, previous-step post-processing occurs
+between them.
+</span></figcaption>
+
+</figure>
+<p class="indent">   The following anchors locate each hop. Paths in this table are relative to <span class="path"><code>deepinfer/</code></span>, except
+those starting with <span class="path"><code>csrc/</code></span>.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-60"><colgroup id="TBL-60-1g"><col id="TBL-60-1"/><col id="TBL-60-2"/></colgroup><tr id="TBL-60-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">File
+and
+anchor</span> </p></td><td class="td10" id="TBL-60-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Symbol,
+  boundary
+  and
+  reading</span> </p></td>
+</tr><tr id="TBL-60-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>entrypoints/llm.py</code></span><span class="ec-lmr-10">:90,168</span> </p></td><td class="td10" id="TBL-60-2-2" style="text-align:left;"> <p class="noindent"><code>generate</code><span class="ec-lmr-10">,
+  </span><code>_run_engine</code><span class="ec-lmr-10">;
+  admission,
+  step/flush
+  loop
+  and
+  cloning.
+  Chapter
+  1.</span> </p></td>
+</tr><tr id="TBL-60-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>engine/llm_engine.py</code></span><span class="ec-lmr-10">:860,885</span> </p></td><td class="td10" id="TBL-60-3-2" style="text-align:left;"> <p class="noindent"><code>step
+ </code><span class="ec-lmr-10">calls
+  the
+  scheduler
+  and
+  receives
+  metadata.
+  Chapters
+  1,
+  5,
+  6.</span> </p></td>
+</tr><tr id="TBL-60-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>csrc/engine/pybind_scheduler.cpp</code></span><span class="ec-lmr-10">:97</span> </p></td><td class="td10" id="TBL-60-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Binding
+  of
+  </span><code>Scheduler::schedule</code><span class="ec-lmr-10">;
+  implementation
+  in
+  </span><span class="path"><code>scheduler.hpp</code></span><span class="ec-lmr-10">:667.
+  Chapter
+  5.</span> </p></td>
+</tr><tr id="TBL-60-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>engine/llm_engine.py</code></span><span class="ec-lmr-10">:961,1017</span> </p></td><td class="td10" id="TBL-60-5-2" style="text-align:left;"> <p class="noindent"><code>_execute_model_async_step
+ </code><span class="ec-lmr-10">and
+  </span><code>_run_workers</code><span class="ec-lmr-10">;
+  route
+  the
+  call
+  to
+  the
+  driver.
+  Chapter
+  6.</span> </p></td>
+</tr><tr id="TBL-60-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>worker/base.py</code></span><span class="ec-lmr-10">:290</span> </p></td><td class="td10" id="TBL-60-6-2" style="text-align:left;"> <p class="noindent"><code>run_workers</code><span class="ec-lmr-10">;
+  broadcast
+  the
+  method
+  to
+  CP
+  followers,
+  then
+  invoke
+  the
+  local
+  worker.
+  This
+  appendix.</span> </p></td>
+</tr><tr id="TBL-60-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>worker/worker.py</code></span><span class="ec-lmr-10">:89,122,154</span> </p></td><td class="td10" id="TBL-60-7-2" style="text-align:left;"> <p class="noindent"><code>execute_model_step</code><span class="ec-lmr-10">;
+  launch
+  forward,
+  process
+  earlier
+  output
+  where
+  applicable,
+  then
+  launch
+  sampling.
+  Chapter
+  6.</span> </p></td>
+</tr><tr id="TBL-60-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-60-8-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   The model runner first prepares input metadata. The eager path calls the model; the graph
+path replays captured work:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing B.3.</b> The model call may be replaced by graph replay.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">326</span><span><span class="k">if</span> <span class="n">run_cuda_graph</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">327</span><span>    <span class="n">model_output</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cuda_graph_runner</span><span class="o">.</span><span class="n">replay</span><span class="p">(</span><span class="n">cuda_graph_used</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">328</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">329</span><span>    <span class="n">model_output</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">(</span><span class="n">kv_caches</span><span class="o">=</span><span class="n">kv_caches</span><span class="p">,</span> <span class="n">input_metadata</span><span class="o">=</span><span class="n">input_metadata</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L326-L329">deepinfer/worker/model_runner.py</a> · lines 326–329</div></div>
+<p class="indent">   The registered architecture name is <span class="path"><code>DeepseekV41ForCausalLM</code></span>. It selects the
+<span class="path"><code>DeepseekVLForCausalLM</code></span> wrapper, whose forward prepares prompt embeddings when needed. It
+then delegates to the base wrapper’s <span class="path"><code>DeepseekForCausalLM.forward</code></span>, which calls the core model
+<span class="cite">[<a href="references.html#Xdeepinfer-atlas-model">95</a>]</span>.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-63"><colgroup id="TBL-63-1g"><col id="TBL-63-1"/><col id="TBL-63-2"/></colgroup><tr id="TBL-63-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">File
+and
+anchor
+within
+</span><span class="path"><code>deepinfer/</code></span> </p></td><td class="td10" id="TBL-63-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Symbol
+  and
+  reading</span> </p></td>
+</tr><tr id="TBL-63-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>worker/model_runner.py</code></span><span class="ec-lmr-10">:308,337</span> </p></td><td class="td10" id="TBL-63-2-2" style="text-align:left;"> <p class="noindent"><code>execute_main_model</code><span class="ec-lmr-10">,
+  </span><code>execute_sample</code><span class="ec-lmr-10">;
+  input
+  preparation
+  and
+  launch
+  boundary.
+  Chapters
+  3,
+  6,
+  8.</span> </p></td>
+</tr><tr id="TBL-63-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/deepseek_vl.p
+y</code></span><span class="ec-lmr-10">:226</span> </p></td><td class="td10" id="TBL-63-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">VL
+  </span><code>forward</code><span class="ec-lmr-10">;
+  delegates
+  to
+  the
+  base
+  causal-LM
+  wrapper.
+  Navigation
+  only
+  for
+  vision
+  processing.</span> </p></td>
+</tr><tr id="TBL-63-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/deepseek.
+py</code></span><span class="ec-lmr-10">:374,154</span> </p></td><td class="td10" id="TBL-63-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Causal-LM
+  </span><code>forward</code><span class="ec-lmr-10">,
+  then
+  </span><code>DeepseekModel.forward</code><span class="ec-lmr-10">;
+  layer
+  loop.
+  Chapters
+  3,
+  9;
+  appendix
+  A.</span> </p></td>
+</tr><tr id="TBL-63-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/decoder_layer.p
+y</code></span><span class="ec-lmr-10">:97</span> </p></td><td class="td10" id="TBL-63-5-2" style="text-align:left;"> <p class="noindent"><code>forward</code><span class="ec-lmr-10">;
+  attention
+  and
+  feed-forward
+  sublayers.
+  Chapters
+  3,
+  7,
+  9.</span> </p></td>
+</tr><tr id="TBL-63-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/deepseek.py</code></span><span class="ec-lmr-10">:383</span> </p></td><td class="td10" id="TBL-63-6-2" style="text-align:left;"> <p class="noindent"><code>sample</code><span class="ec-lmr-10">;
+  main
+  sampling
+  and
+  MTP
+  work.
+  Chapter
+  8.</span> </p></td>
+</tr><tr id="TBL-63-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/layers/sampler.py</code></span><span class="ec-lmr-10">:114</span> </p></td><td class="td10" id="TBL-63-7-2" style="text-align:left;"> <p class="noindent"><code>Sampler.forward</code><span class="ec-lmr-10">;
+  constraints,
+  verification
+  and
+  sampling
+  inputs.
+  Chapters
+  8,
+  10.</span> </p></td>
+</tr><tr id="TBL-63-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-63-8-1" style="text-align:left;"></td></tr></table></div> </div>
+<h3 class="sectionHead" id="follow-results-back-to-their-owner"><span class="titlemark">B.3   </span> <a id="x1-200000B.3"></a>Follow results back to their owner</h3>
+<p class="noindent">The reverse path is not simply <code>Sampler </code>returning a Python answer. Sampling completion permits
+post-processing; C++ updates sequence state and builds pooled output records; the Python
+entrypoint clones records it retains (Figure <a href="appendix-b.html#ref-fig:atlas-results">B.3</a>).
+</p>
+<figure class="figure"><a id="ref-fig:atlas-results"></a>
+<p class="noindent" id="-result-ownership-under-zos-the-output-being-processed-usually-belongs-to-the-preceding-decode-step-a-final-flush-processes-the-remaining-inflight-result-chapters-and-give-the-lifetime-rules"><a aria-label="Open figure at full size" class="figure-image" href="webbook31x.svg" rel="noopener" target="_blank"><img alt="Figure B.3: Result ownership. Under ZOS, the output being processed usually belongs to
+the preceding decode step. A final flush processes the remaining in-flight result. Chapters
+1 and 6 give the lifetime rules." loading="lazy" src="webbook31x.svg"/></a>
+<a id="x1-200001r3"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure B.3: </span><span class="content">Result ownership. Under ZOS, the output being processed usually belongs to
+the preceding decode step. A final flush processes the remaining in-flight result. Chapters
+1 and 6 give the lifetime rules.
+</span></figcaption>
+
+</figure>
+<p class="indent">   The engine installs its callbacks when constructing the driver:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing B.4.</b> Connect worker completion to engine state changes.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">398</span><span><span class="n">driver_kwargs</span> <span class="o">=</span> <span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">399</span><span>    <span class="s2">"engine_callbacks"</span><span class="p">:</span> <span class="n">EngineCallbacks</span><span class="p">(</span><span class="n">post_process_fn</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">post_process</span><span class="p">,</span> <span class="n">pre_sampler_sync_fn</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">pre_sampler_sync</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">400</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L398-L400">deepinfer/engine/llm_engine.py</a> · lines 398–400</div></div>
+<p class="indent">   Start at <span class="path"><code>worker/worker.py</code></span>:248, <code>_post_process_step</code>. It waits for the sampling event,
+runs the model runner’s post-functions and invokes the engine callback on the driver.
+<span class="path"><code>engine/llm_engine.py</code></span>:984, <code>post_process</code>, enters <code>_process_model_outputs </code>at line 687. That
+method calls <code>scheduler.process_outputs </code>at line 727, then <code>build_request_outputs </code>at line
+743. The binding is in <span class="path"><code>csrc/engine/pybind_output.cpp</code></span>:41; the builder and pool are in
+<span class="path"><code>csrc/engine/outputs.hpp</code></span>:94 and 45. The returned array holds integer addresses.
+<span class="path"><code>entrypoints/llm.py</code></span>:181 clones each retained record <span class="cite">[<a href="references.html#Xdeepinfer-engine">5</a>, <a href="references.html#Xdeepinfer-atlas-boundaries">96</a>]</span>.
+</p><p class="indent">   These names identify a dependency path, not a guarantee that one
+<code>step() </code>returns the tokens it just launched. The worker may process step
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math> while
+step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+runs. To investigate missing final tokens, follow <code>flush_inflight_reqs</code>; to investigate stale
+addresses, follow the output pool’s release, not Python reference counts.
+</p>
+<h3 class="sectionHead" id="start-from-a-readme-feature"><span class="titlemark">B.4   </span> <a id="x1-201000B.4"></a>Start from a README feature</h3>
+<p class="noindent">The pinned README lists eight features. These tables connect each name to its controls and a
+source entry point. Batch invariance and deterministic sampling have separate rows because their
+conditions differ. Settings are not a complete launch recipe; follow the indicated chapter for
+defaults and limits <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-atlas-layout">97</a>]</span>.
+</p><p class="indent">   Paths are relative to <span class="path"><code>deepinfer/</code></span>, except <span class="path"><code>csrc/</code></span>, <span class="path"><code>vendor/</code></span> and <span class="path"><code>requirements.txt</code></span>.
+The example entry points’ <code>ep </code>and <code>cp </code>arguments choose group sizes; <code>seq_seed </code>and
+<code>so_args </code>are <code>SamplingParams </code>fields. Names beginning with <code>DEEPINFER_ </code>are environment
+variables.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular wide-table" id="TBL-66"><colgroup id="TBL-66-1g"><col id="TBL-66-1"/><col id="TBL-66-2"/><col id="TBL-66-3"/><col id="TBL-66-4"/></colgroup><tr id="TBL-66-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">README
+feature</span> </p></td><td class="td11" id="TBL-66-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Setting</span> </p></td><td class="td11" id="TBL-66-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Entry
+  file
+  and
+  symbol</span> </p></td><td class="td10" id="TBL-66-1-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Read</span> </p></td>
+</tr><tr id="TBL-66-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Attention
+DP
+/
+balanced
+CP;
+EP
++
+EPLB</span> </p></td><td class="td11" id="TBL-66-2-2" style="text-align:left;"> <p class="noindent"><code>ep</code><span class="ec-lmr-9">,
+  </span><code>cp</code><span class="ec-lmr-9">;
+  </span><span class="path"><code>DEEPINFER_EXPERT_REARRA
+ NGEMENT_STEP_INTERVAL</code></span> </p></td><td class="td11" id="TBL-66-2-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>model_executor/parallel_utils/p
+ arallel_state.py</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>create_process_groups</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>model_executor/eplb/</code></span> </p></td><td class="td10" id="TBL-66-2-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">7,
+  B</span> </p></td>
+</tr><tr id="TBL-66-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">DSpark</span> </p></td><td class="td11" id="TBL-66-3-2" style="text-align:left;"> <p class="noindent"><span class="path"><code>DEEPINFER_ENABLE_MTP_VA
+ RLEN=1</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>DEEPINFER_USE_NEXTN_DEC
+ ODE</code></span>
+<span class="ec-lmr-9">limits
+  draft
+  length</span> </p></td><td class="td11" id="TBL-66-3-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>csrc/engine/mtp_varlen.hpp</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>MTPVarlen::schedule</code></span> </p></td><td class="td10" id="TBL-66-3-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">8</span> </p></td>
+</tr><tr id="TBL-66-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">SWA
+bounded
+replay</span> </p></td><td class="td11" id="TBL-66-4-2" style="text-align:left;"> <p class="noindent"><span class="path"><code>DEEPINFER_YOCO_PREFILL_
+ TRUNCATION_MODE=compact</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>DEEPINFER_YOCO_PREFILL_
+ KEEP_TOKENS</code></span> </p></td><td class="td11" id="TBL-66-4-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>csrc/engine/input_metadata/prep
+ are_tensor_input_v4.cpp</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>fill_yoco_truncation_metadata</code></span><span class="ec-lmr-9">.
+  Decoder
+  truncation;
+  encoder
+  hit
+  recovery
+  has
+  a
+  different
+  release
+  boundary.</span> </p></td><td class="td10" id="TBL-66-4-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">9</span> </p></td>
+</tr><tr id="TBL-66-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Asynchronous
+scheduling</span> </p></td><td class="td11" id="TBL-66-5-2" style="text-align:left;"> <p class="noindent"><span class="path"><code>DEEPINFER_ZERO_OVERHEAD
+ _SCHEDULING</code></span> </p></td><td class="td11" id="TBL-66-5-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>worker/worker.py</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>execute_model_step</code></span> </p></td><td class="td10" id="TBL-66-5-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">6</span> </p></td>
+</tr><tr id="TBL-66-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-66-6-1" style="text-align:left;"></td></tr></table></div> </div>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular wide-table" id="TBL-69"><colgroup id="TBL-69-1g"><col id="TBL-69-1"/><col id="TBL-69-2"/><col id="TBL-69-3"/><col id="TBL-69-4"/></colgroup><tr id="TBL-69-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">README
+feature</span> </p></td><td class="td11" id="TBL-69-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Setting</span> </p></td><td class="td11" id="TBL-69-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Entry
+  file
+  and
+  symbol</span> </p></td><td class="td10" id="TBL-69-1-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Read</span> </p></td>
+</tr><tr id="TBL-69-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Batch-invariant
+inference</span> </p></td><td class="td11" id="TBL-69-2-2" style="text-align:left;"> <p class="noindent"><span class="path"><code>DEEPINFER_BATCH_INVARIA
+ NT=1</code></span><span class="ec-lmr-9">;
+  NVIDIA
+  only</span> </p></td><td class="td11" id="TBL-69-2-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>worker/runtime_config.py</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>configure_worker_kernels</code></span> </p></td><td class="td10" id="TBL-69-2-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">10</span> </p></td>
+</tr><tr id="TBL-69-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Deterministic
+sampling</span> </p></td><td class="td11" id="TBL-69-3-2" style="text-align:left;"> <p class="noindent"><span class="path"><code>DEEPINFER_BATCH_INVARIA
+ NT=1</code></span><span class="ec-lmr-9">,
+  </span><span class="path"><code>DEEPINFER_ENABLE_MTP_VA
+ RLEN=0</code></span><span class="ec-lmr-9">,
+  fixed
+  </span><code>seq_seed</code><span class="ec-lmr-9">;
+  NVIDIA
+  only</span> </p></td><td class="td11" id="TBL-69-3-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>model_executor/layers/tilelang_
+ ops/cuda/fused_sample.py</code></span><span class="ec-lmr-9">:
+  position/role-keyed
+  random
+  draws.
+  No
+  released
+  end-to-end
+  test
+  of
+  this
+  recipe.</span> </p></td><td class="td10" id="TBL-69-3-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">10</span> </p></td>
+</tr><tr id="TBL-69-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Structured
+outputs</span> </p></td><td class="td11" id="TBL-69-4-2" style="text-align:left;"> <p class="noindent"><code>so_args</code> </p></td><td class="td11" id="TBL-69-4-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>model_executor/layers/sampler.p
+ y</code></span><span class="ec-lmr-9">:
+  </span><span class="path"><code>_get_so_mask</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>structure_output/matcher.py</code></span> </p></td><td class="td10" id="TBL-69-4-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">10</span> </p></td>
+</tr><tr id="TBL-69-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Optimized
+kernels,
+model
+and
+sampler
+runtime</span> </p></td><td class="td11" id="TBL-69-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">No
+  single
+  switch</span> </p></td><td class="td11" id="TBL-69-5-3" style="text-align:left;"> <p class="noindent"><span class="path"><code>vendor/</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>requirements.txt</code></span><span class="ec-lmr-9">;
+  </span><span class="path"><code>model_executor/layers/tilelang_
+ ops/ops.py</code></span><span class="ec-lmr-9">:
+  backend
+  dispatch.
+  Library
+  internals
+  are
+  outside
+  the
+  book’s
+  detailed
+  treatment.</span> </p></td><td class="td10" id="TBL-69-5-4" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">3,
+  A,
+  B</span> </p></td>
+</tr><tr id="TBL-69-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-69-6-1" style="text-align:left;"></td></tr></table></div> </div>
+
+<h3 class="sectionHead" id="choose-a-directory-before-choosing-a-file"><span class="titlemark">B.5   </span> <a id="x1-202000B.5"></a>Choose a directory before choosing a file</h3>
+<p class="noindent">Coverage labels below describe the book, not the maturity of the software. <em>Deep </em>means a
+mechanism is traced in detail; <em>partial </em>means selected paths are analysed; <em>locate </em>gives
+responsibility and an entry point only; <em>outside </em>marks implementation details not analysed. A
+deep directory entry still does not mean every file in it was reviewed.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-72"><colgroup id="TBL-72-1g"><col id="TBL-72-1"/><col id="TBL-72-2"/></colgroup><tr id="TBL-72-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Runtime area</span> </p></td><td class="td10" id="TBL-72-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Responsibility and coverage</span> </p></td>
+</tr><tr id="TBL-72-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/entrypoints/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>engine/</code></span> </p></td><td class="td10" id="TBL-72-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Public                     LLM                     interface,
+  request lifecycle and scheduling orchestration. Deep:
+  chapters 1, 5, 6. The second path here and below is
+  relative to </span><span class="path"><code>deepinfer/</code></span> <span class="ec-lmr-10">unless stated otherwise.</span> </p></td>
+</tr><tr id="TBL-72-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>csrc/engine/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>deepinfer/_C/</code></span> </p></td><td class="td10" id="TBL-72-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Native  scheduler,  sequence/block  state,  metadata
+  and  output  bindings;  Python  extension  interface.
+  Deep: chapters 1, 4–6, 8; appendix A.</span> </p></td>
+</tr><tr id="TBL-72-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/worker/</code></span> </p></td><td class="td10" id="TBL-72-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Worker  lifetime,  model  runner,  cache  engine  and
+  graphs.   Deep   for   execution/state;   partial   for
+  initialisation. Chapters 3, 4, 6, 9.</span> </p></td>
+</tr><tr id="TBL-72-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/input_metadata/</code></span> </p></td><td class="td10" id="TBL-72-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Python metadata views, ZOS preparation, YOCO
+  and draft layouts. Partial: chapters 3, 6, 8, 9.</span> </p></td>
+</tr><tr id="TBL-72-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/eplb/</code></span> </p></td><td class="td10" id="TBL-72-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Statistics,   replica/placement   policy   and   weight
+  movement. Deep: chapter 7.</span> </p></td>
+</tr><tr id="TBL-72-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>structure_output/</code></span> </p></td><td class="td10" id="TBL-72-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Grammar   compilation,   matching   and   rollback.
+  Partial: chapters 5, 10.</span> </p></td>
+</tr><tr id="TBL-72-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-72-8-1" style="text-align:left;"></td></tr></table></div> </div>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-75"><colgroup id="TBL-75-1g"><col id="TBL-75-1"/><col id="TBL-75-2"/></colgroup><tr id="TBL-75-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Model and kernel area within </span><span class="path"><code>deepinf
+er/</code></span> </p></td><td class="td10" id="TBL-75-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Responsibility and coverage</span> </p></td>
+</tr><tr id="TBL-75-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/v4_module
+s/</code></span> </p></td><td class="td10" id="TBL-75-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Attention, compression, indexer, MoE, sharing and
+  model  adapters.  Partial  overall;  deep  paths  in
+  chapters 3, 7, 9 and appendix A.</span> </p></td>
+</tr><tr id="TBL-75-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/mtp/</code></span> </p></td><td class="td10" id="TBL-75-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">DFlash proposals and confidence. Partial: chapter 8.</span></p></td>
+</tr><tr id="TBL-75-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/models/vision_en
+coder/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>ve/</code></span> </p></td><td class="td10" id="TBL-75-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Vision   computation   and   multimodal   processing
+  workers.  Locate;  architecture  and  preprocessing
+  outside.</span> </p></td>
+</tr><tr id="TBL-75-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/layers/</code></span> </p></td><td class="td10" id="TBL-75-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Sampling, linear/norm/rotary layers and attention
+  backend   interfaces.   Partial:   chapters   3,   8,   10;
+  appendix A.</span> </p></td>
+</tr><tr id="TBL-75-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>model_executor/layers/tilelang_
+ops/</code></span> </p></td><td class="td10" id="TBL-75-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Interfaces,  references  and  device  kernels.  Selected
+  formulas  are  analysed;  general  kernel  tuning  is
+  outside.</span> </p></td>
+</tr><tr id="TBL-75-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>tilelang_ops/cuda/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>tilelang_ops/
+asc/</code></span> </p></td><td class="td10" id="TBL-75-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Relative to the preceding layers directory: GPU and
+  Ascend implementations. CUDA has selected deep
+  dives; Ascend internals are outside.</span> </p></td>
+</tr><tr id="TBL-75-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-75-8-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   For the model modules not expanded in appendix A, start with <span class="path"><code>v4_modules/hc.py</code></span>:
+<code>HCLayerMixin </code>mixes the multiple residual streams around attention and feed-forward sublayers,
+while <code>HCHead </code>folds them back before the output head. <span class="path"><code>hc_blocks.py</code></span>, <span class="path"><code>hc_lazy.py</code></span> and <span class="path"><code>mhc_*</code></span>
+provide related mixing and deferred work. In <span class="path"><code>v4_modules/engram.py</code></span>, <code>EngramRuntime </code>fetches
+sharded n-gram embeddings; related metadata and parameter files describe their representation.
+These are navigation descriptions, not derivations or evaluations of either model mechanism
+<span class="cite">[<a href="references.html#Xdeepinfer-atlas-model">95</a>]</span>.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-78"><colgroup id="TBL-78-1g"><col id="TBL-78-1"/><col id="TBL-78-2"/></colgroup><tr id="TBL-78-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Support area</span> </p></td><td class="td10" id="TBL-78-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Responsibility and coverage</span> </p></td>
+</tr><tr id="TBL-78-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/hugging_face/</code></span> </p></td><td class="td10" id="TBL-78-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Configuration  translation,  checkpoint  parameters,
+  loading  and  tokenisation.  Configuration  is  partial;
+  loading internals outside. Start with </span><span class="path"><code>loading.py</code></span><span class="ec-lmr-10">and
+  </span><span class="path"><code>weights.py</code></span><span class="ec-lmr-10">.</span> </p></td>
+</tr><tr id="TBL-78-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/model_executor/model_
+loader.py</code></span> </p></td><td class="td10" id="TBL-78-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Registry  lookup  and  model  construction/loading.
+  Locate; model structure also starts in </span><span class="path"><code>models/v4_m
+ odules/builder.py</code></span><span class="ec-lmr-10">.</span> </p></td>
+</tr><tr id="TBL-78-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/model_executor/parall
+el_utils/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>deepinfer/distributed/</code></span> </p></td><td class="td10" id="TBL-78-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Groups,   collectives,   buffers   and   shared-memory
+  transport. Partial: chapters 6, 7 and this appendix;
+  complete initialisation/recovery outside.</span> </p></td>
+</tr><tr id="TBL-78-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-5-1" style="text-align:left;"><p class="noindent"><span class="path"><code>deepinfer/platform.py</code></span><span class="ec-lmr-10">, </span><span class="path"><code>deepinfer
+/npu_ops/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>deep_cluster/</code></span> </p></td><td class="td10" id="TBL-78-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Platform selection, NPU adapters, device discovery
+  and  affinity.  Locate;  platform-specific  algorithms
+  outside.</span> </p></td>
+</tr><tr id="TBL-78-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>examples/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>eval/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>tests/</code></span> </p></td><td class="td10" id="TBL-78-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Launch  and  benchmark  entry  points,  evaluation
+  and  tests.  Partial:  chapters  2,  8–11;  inspect  test
+  assertions   rather   than   treating   file   names   as
+  guarantees.</span> </p></td>
+</tr><tr id="TBL-78-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>vendor/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>scripts/</code></span><span class="ec-lmr-10">, </span><span class="path"><code>csrc/graph_time
+r/</code></span> </p></td><td class="td10" id="TBL-78-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Independent  library  pins,  build  scripts  and  native
+  timing.  Dependency  boundaries  and  timing  are
+  partial; library/kernel implementation surveys and
+  build-system internals outside.</span> </p></td>
+</tr><tr id="TBL-78-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-8-1" style="text-align:left;"><p class="noindent"><span class="path"><code>doc/</code></span><span class="ec-lmr-10">, root README and requirements</span> </p></td><td class="td10" id="TBL-78-8-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Deployment                 account,                 usage
+  and installation requirements. Chapter 11 separates
+  described service logic from released code.</span> </p></td>
+</tr><tr id="TBL-78-9-" style="vertical-align:baseline;"><td class="td01" id="TBL-78-9-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   Platform dispatch has a useful search boundary: <span class="path"><code>model_executor/layers/tilelang_ops/ops.py</code></span>
+imports the backend selected by <code>PLATFORM.tilelang_ops_backend </code>and exports its <code>*_tl</code>
+factories. An interface module can therefore look platform-neutral while selecting CUDA or
+Ascend implementations. This is a route into those files, not evidence that their numerics or
+performance are identical. The independent DeepSeek libraries in <span class="path"><code>vendor/</code></span> include DeepGEMM,
+DeepEP, DeepSelect and FlashMLA; use their pinned submodule revisions when crossing that
+repository boundary. TileKernels is another independent DeepSeek library, installed
+through <span class="path"><code>tile-kernels==2.1.0</code></span> in <span class="path"><code>requirements.txt</code></span>, not a <span class="path"><code>vendor/</code></span> submodule
+<span class="cite">[<a href="references.html#Xdeepinfer-atlas-layout">97</a>]</span>.
+</p>
+<h3 class="sectionHead" id="find-the-corresponding-code-in-another-edition"><span class="titlemark">B.6   </span> <a id="x1-203000B.6"></a>Find the corresponding code in another edition</h3>
+<p class="noindent">Begin with a symbol and responsibility, then use line anchors as a convenience. For example, from
+a DeepInfer checkout:
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>rg<span class="w"> </span>-n<span class="w"> </span><span class="s1">'def execute_model_step|def _post_process_step'</span><span class="w"> </span>deepinfer/worker
+rg<span class="w"> </span>-n<span class="w"> </span><span class="s1">'class Compressor|class MQA'</span><span class="w"> </span>deepinfer/model_executor/models
+rg<span class="w"> </span>-n<span class="w"> </span><span class="s1">'"schedule"|"process_outputs"'</span><span class="w"> </span>csrc/engine/pybind_scheduler.cpp
+rg<span class="w"> </span>--files<span class="w"> </span>deepinfer/model_executor/parallel_utils
+</code></pre></div>
+<p class="indent">   Follow callers as well as definitions: a helper’s existence does not establish that the released
+engine drives it, as chapter 11’s state-transfer example showed. Recheck defaults and the chosen
+model/platform branch. To compare a checkout with this book’s evidence, run <code>make
+check </code>from the book with <code>DEEPINFER_SOURCE=/path/to/DeepInfer</code>. A mismatch
+detects a changed source edition; it does not identify which behavioural claims remain
+valid.
+</p><p class="indent">   As a reading exercise, choose one object: an input position, a compressed row, a grammar
+matcher or a pooled output address. Locate its creator, its next reader and its release or reuse
+condition. The directory map supplies entry points; the ownership and evidence methods from the
+chapters supply the check.
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+<a id="x1-203001r194"></a>
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="appendix-a.html"><small>PREVIOUS</small>← Compression and indexing</a><a class="next" href="appendix-c.html"><small>NEXT</small>Source edition and excerpts →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#processes-devices-and-communication-groups">B.1 Processes, devices and communication groups</a><a class="" href="#follow-one-step-into-computation">B.2 Follow one step into computation</a><a class="" href="#follow-results-back-to-their-owner">B.3 Follow results back to their owner</a><a class="" href="#start-from-a-readme-feature">B.4 Start from a README feature</a><a class="" href="#choose-a-directory-before-choosing-a-file">B.5 Choose a directory before choosing a file</a><a class="" href="#find-the-corresponding-code-in-another-edition">B.6 Find the corresponding code in another edition</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

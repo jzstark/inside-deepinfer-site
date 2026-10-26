@@ -4,9 +4,9 @@
 <body><a class="skip-link" href="#reading">Skip to text</a>
 <aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
 <p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
-<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">READING SAMPLE</div><a class="book-link active" href="index.html"><span>00</span>Preface</a><a class="book-link " href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="references.html"><span>↗</span>References</a></nav>
-<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a><p>Preface + chapter 2<br>Other chapters are in the PDF.</p></div></details></aside>
-<div class="reader-layout"><main id="reading"><div class="page-meta"><span>THE WEB EDITION</span><span>READING SAMPLE</span></div>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link active" href="index.html" aria-current="page"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
 <article><h1 class="likechapterHead" id="preface"><a id="x1-1000"></a>Preface</h1>
 <p id="preface1"><a id="Q1-1-2"></a>
 </p><p class="noindent">You type a question into ChatGPT and wait. An answer begins to appear. You ask a follow-up,
@@ -79,7 +79,7 @@ code.
 </p><p class="indent">   There are twenty-eight experiments. They require Python 3.10 or later; all but one use only
 the standard library. The exception runs DeepInfer’s placement policy with PyTorch on a
 CPU. The experiments, their saved outputs and the source checks are available at
-<a class="url" href="https://github.com/jzstark/inside-deepinfer-code"><code>https://github.com/jzstark/inside-deepinfer-code</code></a>; Appendix <a class="pdf-ref" href="book.pdf#nameddest=appendix.C" title="Open this reference in the complete PDF">C</a> explains how the outputs
+<a class="url" href="https://github.com/jzstark/inside-deepinfer-code"><code>https://github.com/jzstark/inside-deepinfer-code</code></a>; Appendix <a href="appendix-c.html#ref-app:sources">C</a> explains how the outputs
 were recorded. Assigned costs and simulated clocks expose dependencies and trade-offs; they do
 not measure accelerator performance.
 </p><p class="indent">   The inspected engine release requires Python 3.12 and supports NVIDIA SM100 GPUs with
@@ -97,10 +97,10 @@ Approximate reconstruction then tests the limits of what cached state can be rec
 chapters examine the guarantees these choices must meet and the service that connects engines
 to one another and to storage. A closing request trace brings the mechanisms back
 together.
-</p><p class="indent">   The appendices support closer reading. Appendix <a class="pdf-ref" href="book.pdf#nameddest=appendix.A" title="Open this reference in the complete PDF">A</a> follows compression and indexing into
-attention. Appendix <a class="pdf-ref" href="book.pdf#nameddest=appendix.B" title="Open this reference in the complete PDF">B</a> maps README features to source entry points, traces a step’s calls and
+</p><p class="indent">   The appendices support closer reading. Appendix <a href="appendix-a.html#ref-app:compression">A</a> follows compression and indexing into
+attention. Appendix <a href="appendix-b.html#ref-app:map">B</a> maps README features to source entry points, traces a step’s calls and
 returns, and shows how processes and devices are grouped. Use it whenever a chapter enters an
-unfamiliar part of the repository. Appendix <a class="pdf-ref" href="book.pdf#nameddest=appendix.C" title="Open this reference in the complete PDF">C</a> identifies the source edition and explains
+unfamiliar part of the repository. Appendix <a href="appendix-c.html#ref-app:sources">C</a> identifies the source edition and explains
 reproduction; a terms table locates definitions.
 </p><p class="indent">   The detailed walkthroughs cover the main runtime mechanisms and selected model-driven
 state paths. Low-precision storage is included; quantisation algorithms and general kernel
@@ -115,9 +115,9 @@ into DeepInfer.
                                                                                   
                                                                                   
 </p>
-</article><nav class="page-turn" aria-label="Sample pages"><a class="next" href="chapter-02.html"><small>NEXT IN THIS SAMPLE · CHAPTER 2</small>Where the time goes →</a></nav>
+</article><nav class="page-turn" aria-label="Book pages"><a class="next" href="chapter-01.html"><small>NEXT</small>A generation loop →</a></nav>
 <footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
 <a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
 Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
-<a href="COPYRIGHT.txt">Copyright and permissions</a> · Generated from the book’s LaTeX sources.</footer></main>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
 <aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#why-deepinfer">Why DeepInfer</a><a class="" href="#what-you-will-be-able-to-follow">What you will be able to follow</a><a class="" href="#what-you-can-try">What you can try</a><a class="" href="#the-route-through-the-book">The route through the book</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

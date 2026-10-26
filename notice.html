@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Copyright and edition · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link active" href="notice.html" aria-current="page"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><h1 class="likechapterHead" id="copyright-and-edition"><a id="x1-207000"></a>Copyright and edition</h1>
+<p class="noindent"><strong>Inside DeepInfer: How an LLM Inference Engine Works</strong>
+</p><p class="noindent"><span class="ts1-lmr10-">©</span><span class="ec-lmr-10"> 2026 Jianxin Zhao.</span>
+</p><p class="noindent"><span class="ec-lmr-10">Except where otherwise noted, the book’s original text and illustrations, including the web and PDF
+editions, are licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International licence (CC BY-NC-SA 4.0):</span><br class="newline"/><a class="url" href="https://creativecommons.org/licenses/by-nc-sa/4.0/"><code>https://creativecommons.org/licenses/by-nc-sa/4.0/</code></a><span class="ec-lmr-10">.</span>
+</p><p class="noindent"><span class="ec-lmr-10">You may share, translate and adapt this material for noncommercial purposes under the licence’s terms,
+with attribution, a link to the licence and an indication of changes. Shared adaptations must use the same
+or a compatible licence. For a separate commercial licence, contact the author. Exceptions and limitations
+to copyright remain unaffected. Separately licensed code and third-party material retain their own
+terms.</span>
+</p><p class="noindent"><span class="ec-lmr-10">Version 1.0, October 2026. The companion code for this version is tagged </span><code>v1.0 </code><span class="ec-lmr-10">at</span><br class="newline"/><a class="url" href="https://github.com/jzstark/inside-deepinfer-code"><code>https://github.com/jzstark/inside-deepinfer-code</code></a><span class="ec-lmr-10">.</span>
+</p><p class="noindent"><span class="ec-lmr-10">This is an independent book. It is not affiliated with, sponsored by or endorsed by DeepSeek. Product and
+company names belong to their respective owners; this book uses them only to identify the software it
+describes.</span>
+</p><p class="noindent"><span class="ec-lmr-10">The book describes DeepInfer at commit </span><code>774ce244b87cc0eb8d4b94ab9f5de2ab22049f01</code><span class="ec-lmr-10">, inspected in
+October 2026. Later versions may differ. Line references, defaults and behaviour stated here apply to that
+edition.</span>
+</p><p class="noindent"><span class="ec-lmr-10">DeepInfer is distributed under the Apache License 2.0. Source excerpts are reproduced under that licence
+with attribution. Common leading indentation has been removed for typesetting; the code is otherwise
+unchanged. Appendix </span><a href="appendix-c.html#ref-app:sources"><span class="ec-lmr-10">C</span></a> <span class="ec-lmr-10">records the source edition, file hashes, excerpt ranges and licence
+notices. The companion code is also distributed under Apache-2.0; its reuse is governed by that
+licence.</span>
+</p><p class="noindent"><span class="ec-lmr-10">The experiments are teaching models written for this book. None of them runs the DeepInfer engine; lab 16
+executes one unmodified DeepInfer policy file on CPU tensors. Their outputs are not performance
+measurements of DeepInfer. Performance figures and service descriptions attributed to DeepSeek’s
+documentation or model report are DeepSeek’s reported findings; this book has not reproduced
+them.</span>
+</p><p class="noindent"><span class="ec-lmr-10">This book is provided as is, without warranty. Check a claim against the source edition before relying on
+it.</span>
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="references.html"><small>PREVIOUS</small>← References</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Different correctness contracts · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link" href="chapter-08.html"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link active" href="chapter-10.html" aria-current="page"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 10</p><h1 class="chapterHead" id="different-correctness-contracts"><a id="x1-15000010"></a>Different correctness contracts</h1>
+<p class="noindent"><a id="ref-ch:contracts"></a>
+</p><p class="indent">   The previous chapter separated two questions: whether mask and compact compute the same
+truncated model, and whether that model is close enough to a full prefill. A passing test answers
+the question encoded in its assertion. Changing the question can change the verdict without
+changing the engine.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-12">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">A row contains <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn></mrow></math>.
+Why  might  its  sum  change  when  an  unrelated  row  joins  the  batch?  If  two
+computations pass a check whose threshold is zero, have they necessarily produced
+equal values? </p>
+</div>
+</div>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/21_equality.py
+</code></pre></div>
+<p class="indent">   The experiment makes the reduction order depend on the number of rows. It then keeps that
+order fixed, and finally tries two other checks:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>row-count-dependent: single=1, batched=0
+row-count-dependent: masked=0, compact=1
+fixed order: A=1 in every layout; 6 subset/order checks
+adjacent float32 inputs: equal=False, abs diff=1.16415321827e-10
+exp(d)-1-d metric=0; zero does not establish equality
+logprob lists differ; both perplexities=7.389056099
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/21_equality.txt">results/21_equality.txt</a></div></div>
+<p class="indent">   The unrelated row changes the first result from 1 to 0. Fixing the order removes that
+difference. Yet a numerical difference metric can still return zero for unequal inputs, and two
+different logprob lists can have equal perplexity. These are three different observations, not three
+ways to prove the same claim.
+</p><p class="indent"> <strong>Scope and order. </strong>We first explain the reduction, then follow DeepInfer’s batch-invariance
+flag into its libraries. Golden tokens let us compare computations along a fixed history. A second
+experiment separates repeatable random draws from a correct output distribution. Finally, we
+trace how grammar masks and matcher state constrain speculative output. The released tests
+supply the questions and assertions throughout; this chapter inspects them but does not run their
+model workloads.
+</p>
+<h3 class="sectionHead" id="equality-needs-a-fixed-computation-order"><span class="titlemark">10.1   </span> <a id="x1-15100010.1"></a>Equality needs a fixed computation order</h3>
+<p class="noindent">In exact arithmetic both ways of grouping the row give 1. In Python’s usual binary64 arithmetic,
+adding 1 to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup></mrow></math>
+loses the 1. The lab’s single-row path adds from left to right: </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup> <mo class="MathClass-bin" stretchy="false">+</mo> <mo class="MathClass-open" stretchy="false">(</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Its multi-row path gives alternating entries to two lanes. The first lane adds
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>, the second
+contains <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mn>16</mn></mrow></msup></mrow></math>,
+and the lane totals add to 0. A <em>reduction </em>combines several values into one; its grouping is part of
+the numerical computation.
+</p><p class="indent">   Here is the entire layout-dependent rule. Masking keeps the batch shape but skips unwanted
+outputs; compacting removes those rows before the call:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 10.1.</b> Choose the lane count from the batch shape.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">def</span> <span class="nf">reduce_rows</span><span class="p">(</span><span class="n">rows</span><span class="p">,</span> <span class="n">active</span><span class="p">,</span> <span class="n">fixed</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">lanes</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">fixed</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">rows</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span> <span class="k">else</span> <span class="mi">2</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="n">result</span> <span class="o">=</span> <span class="p">{}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">values</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">active</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>            <span class="n">partials</span> <span class="o">=</span> <span class="p">[</span><span class="n">left_sum</span><span class="p">(</span><span class="n">values</span><span class="p">[</span><span class="n">lane</span><span class="p">::</span><span class="n">lanes</span><span class="p">])</span> <span class="k">for</span> <span class="n">lane</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">lanes</span><span class="p">)]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>            <span class="n">result</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">left_sum</span><span class="p">(</span><span class="n">partials</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>    <span class="k">return</span> <span class="n">result</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/21_equality.py">labs/21_equality.py</a> · lines 19–27</div></div>
+<p class="indent">   Neither operation changes the retained row’s values. Nevertheless, two physical rows select
+two lanes even if only one output is wanted. One compact row selects one lane. With <code>fixed=True</code>,
+both calls use one lane and agree. The lab checks all six combinations of nonempty retained
+subsets and row orders for its two-row input, comparing masked and compact calls against a
+direct sum.
+</p><p class="indent">   This isolates one cause of a batch-dependent result. An engine also has to align dtypes, fused
+operations, kernel choices and the visible attention keys. Removing <em>query rows </em>can preserve the
+remaining computation when rows are independent in those respects. Removing keys from a
+retained query changes its mathematical input, as chapter 9 showed. No choice of addition order
+can undo that change. Figure <a href="chapter-10.html#ref-fig:contract-shapes">10.1</a> sets this comparison beside the other two execution changes
+this chapter tests.
+</p>
+<figure class="figure"><a id="ref-fig:contract-shapes"></a>
+<p class="noindent" id="-three-changes-of-execution-shape-they-need-compatible-numerical-paths-as-well-as-compatible-inputs"><a aria-label="Open figure at full size" class="figure-image" href="webbook24x.svg" rel="noopener" target="_blank"><img alt="Figure 10.1: Three changes of execution shape. They need compatible numerical paths as
+well as compatible inputs." loading="lazy" src="webbook24x.svg"/></a>
+<a id="x1-151001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 10.1: </span><span class="content">Three changes of execution shape. They need compatible numerical paths as
+well as compatible inputs.
+</span></figcaption>
+
+</figure>
+<p class="indent">   We will distinguish four kinds of claim. An <em>exact comparison </em>requires equal observed values. A
+<em>tolerance check </em>admits a specified difference under a specified metric. A <em>distributional check </em>asks
+whether sampled outputs follow the intended probabilities. A <em>task or format check </em>asks whether
+an answer satisfies a requirement, such as a grammar. A valid format does not establish a
+factually correct answer.
+</p><p class="indent">   Several released comments call direct comparisons “bitwise”. We will state the comparator:
+Python <code>== </code>and <code>torch.equal </code>compare numerical values, not raw byte strings. For example,
+numerical equality does not distinguish positive and negative zero. More importantly for this
+chapter, a zero <em>threshold on a computed metric </em>need not even establish value equality. We return
+to the lab’s counterexample when we open <code>test_kl.py</code>.
+</p>
+<h3 class="sectionHead" id="one-flag-reaches-several-libraries"><span class="titlemark">10.2   </span> <a id="x1-15200010.2"></a>One flag reaches several libraries</h3>
+<p class="noindent">DeepInfer’s README offers a batch-invariance setting: a request’s result should not depend on
+its batch neighbours. The worker translates that setting into library configuration before running
+model computations <span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-invariant-runtime">76</a>]</span>. At lines 67–69 of <span class="path"><code>deepinfer/worker/runtime_config.py</code></span>, the
+condition is “batch invariance enabled, or NPU”. Its body is:
+</p><p class="indent"> <a id="ref-lst:invariant_calls"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.2.</b> Enable deterministic algorithms in two kernel libraries.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">68</span><span><span class="n">deep_gemm</span><span class="o">.</span><span class="n">use_deterministic_algorithms</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">69</span><span><span class="n">tile_kernels</span><span class="o">.</span><span class="n">use_deterministic_algorithms</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/runtime_config.py#L68-L69">deepinfer/worker/runtime_config.py</a> · lines 68–69</div></div>
+<p class="indent">   The NPU condition does not mean the complete feature is available there. Lines 61–63
+separately assert that <code>DEEPINFER_BATCH_INVARIANT </code>is off on NPU. The adjacent comment says
+to remove this restriction after full support; the comment on line 67 says that the NPU setting
+prevents unstable CI numerics (<em>author’s translations</em>). These are distinct scopes: deterministic
+algorithms in particular libraries, and an engine-wide batch-invariance promise. The README
+describes the latter as NVIDIA-only.
+</p><p class="indent">   The flag also reaches attention. The two sparse MLA decode calls in
+<span class="path"><code>deepinfer/model_executor/models/v4_modules/attn.py</code></span>, lines 666 and 1002, pass
+<code>batch_invariant=envs.DEEPINFER_BATCH_INVARIANT</code>. Earlier in the same file, it
+changes the choice of fused normalisation and rotary-position operations. Read the entire
+condition:
+</p><p class="indent"> <a id="ref-lst:invariant_fusion"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.3.</b> The flag removes one route into the fused path.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">87</span><span><span class="bp">self</span><span class="o">.</span><span class="n">use_fused_norm_rope_attn_rope_cast</span> <span class="o">=</span> <span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">88</span><span>    <span class="c1"># disabled in dense packed-KV decoding</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">89</span><span>    <span class="p">((</span><span class="ow">not</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_BATCH_INVARIANT</span> <span class="ow">and</span> <span class="n">cfg</span><span class="o">.</span><span class="n">engine_type</span> <span class="o">==</span> <span class="n">EngineType</span><span class="o">.</span><span class="n">PROMPT</span><span class="p">)</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">is_sparse</span> <span class="ow">or</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_packed_kv</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">90</span><span>    <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_heads</span> <span class="ow">in</span> <span class="p">(</span><span class="mi">64</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">91</span><span>    <span class="ow">and</span> <span class="n">PLATFORM</span><span class="o">.</span><span class="n">is_gpu</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">92</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/v4_modules/attn.py#L87-L92">deepinfer/model_executor/models/v4_modules/attn.py</a> · lines 87–92</div></div>
+<p class="indent">   When the flag is on, <code>EngineType.PROMPT </code>alone no longer enables this fusion. But <code>is_sparse</code>
+or <code>not has_packed_kv </code>can still do so, subject to the head-count and GPU conditions. Saying
+that the flag disables all fused prefill paths would miss those alternatives. Aligning prefill and
+decode numerics is a plausible reason for controlling fusion; the predicate alone does not prove
+that explanation or the resulting equality.
+</p><p class="indent">   Chapter 7 introduced a second source of layout changes: expert replicas. DeepInfer’s DeepEP
+buffer has this option:
+</p><p class="indent"> <a id="ref-lst:invariant_ep"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.4.</b> Restrict reduction choices when invariance and expert rearrangement are both
+enabled.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">79</span><span><span class="n">allow_multiple_reduction</span><span class="o">=</span><span class="ow">not</span> <span class="p">(</span><span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_BATCH_INVARIANT</span> <span class="ow">and</span> <span class="n">envs</span><span class="o">.</span><span class="n">DEEPINFER_EXPERT_REARRANGEMENT_STEP_INTERVAL</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">),</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/parallel_utils/userbuffer.py#L79">deepinfer/model_executor/parallel_utils/userbuffer.py</a> · line 79</div></div>
+<p class="indent">   The restriction requires <em>both </em>batch invariance and a positive expert rearrangement
+interval. Recall that replica selection includes a token’s index in the batch. Changing
+neighbours can therefore change its destination rank. A changed route may change how
+partial results are summed. That is a control-flow inference linking the replica rule
+to this option; these callers do not reveal or prove the libraries’ internal reduction
+order.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-33"><colgroup id="TBL-33-1g"><col id="TBL-33-1"/><col id="TBL-33-2"/></colgroup><tr id="TBL-33-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-33-1-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Owner                          </span></td><td class="td10" id="TBL-33-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Responsibility
+  visible
+  at
+  this
+  boundary</span> </p></td>
+</tr><tr id="TBL-33-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-33-2-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">DeepInfer                      </span></td><td class="td10" id="TBL-33-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Choose
+  modes,
+  construct
+  metadata,
+  pass
+  flags
+  and
+  compare
+  end-to-end
+  results</span> </p></td>
+</tr><tr id="TBL-33-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-33-3-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">DeepGEMM, TileKernels  </span></td><td class="td10" id="TBL-33-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Implement
+  the
+  requested
+  deterministic
+  kernel
+  algorithms</span> </p></td>
+</tr><tr id="TBL-33-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-33-4-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">FlashMLA                     </span></td><td class="td10" id="TBL-33-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Provide
+  sparse
+  MLA
+  and
+  fused
+  norm/RoPE
+  kernels;
+  receive
+  the
+  sparse
+  decode
+  invariance
+  option</span> </p></td>
+</tr><tr id="TBL-33-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-33-5-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">DeepEP                        </span></td><td class="td10" id="TBL-33-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Perform
+  expert
+  communication/combine
+  with
+  the
+  selected
+  reduction
+  option</span> </p></td>
+</tr></table></div> </div>
+<p class="indent">   This chapter’s comparison is a division of responsibility, not a claim that DeepInfer invented
+deterministic reductions. DeepGEMM, TileKernels, FlashMLA and DeepEP are independent
+DeepSeek repositories. Chapter 7 records the pinned evidence for the replica rule and the caller’s
+communication paths. The attention calls lead to FlashMLA, named in chapter 3: DeepInfer’s
+attention backend imports its sparse attention and fused norm/RoPE operations, while the V4
+attention module also imports the fused operations directly <span class="cite">[<a href="references.html#Xdeepinfer-attention-backend">27</a>, <a href="references.html#Xdeepinfer-attention">22</a>]</span>. The manifest records
+FlashMLA commit <code>2e5429fc</code>, pinned by DeepInfer’s <span class="path"><code>vendor/FlashMLA</code></span> submodule. This identifies
+the dependency; it does not audit its kernel internals. A flag at any one boundary cannot
+establish the whole engine contract; the next section examines what the released tests actually
+                                                                                  
+                                                                                  
+compare.
+</p>
+<h3 class="sectionHead" id="golden-tokens-hold-the-trajectory-fixed"><span class="titlemark">10.3   </span> <a id="x1-15300010.3"></a>Golden tokens hold the trajectory fixed</h3>
+<p class="noindent">Suppose two runs disagree at token 7. By token 8, their histories differ, so their model scores need
+not agree even in exact arithmetic. To locate the numerical difference, a test can force the same
+token history while continuing to compute the model’s probabilities. This is <em>teacher forcing</em>.
+DeepInfer calls the forced sequence <code>golden_token_ids</code>.
+</p><p class="indent">   The batch-invariance test first generates a batch of 64 requests. It then replays each request
+alone with the batched output as its golden sequence:
+</p><p class="indent"> <a id="ref-lst:golden_replay"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.5.</b> Hold the trajectory fixed while changing the batch.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">99</span><span><span class="k">for</span> <span class="n">token_ids</span><span class="p">,</span> <span class="n">output</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">prompt_token_ids</span><span class="p">,</span> <span class="n">outputs</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">100</span><span>    <span class="n">sp</span> <span class="o">=</span> <span class="n">copy</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">sampling_params</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">101</span><span>    <span class="n">sp</span><span class="o">.</span><span class="n">golden_token_ids</span> <span class="o">=</span> <span class="p">[</span><span class="n">x</span><span class="o">.</span><span class="n">token_id</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">output</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">102</span><span>    <span class="n">output_single</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">sp</span><span class="p">,</span> <span class="p">[</span><span class="n">token_ids</span><span class="p">],</span> <span class="n">use_tqdm</span><span class="o">=</span><span class="kc">False</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">103</span><span>    <span class="n">result_batched</span> <span class="o">=</span> <span class="n">_get_result</span><span class="p">(</span><span class="n">output</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">104</span><span>    <span class="n">result_single</span> <span class="o">=</span> <span class="n">_get_result</span><span class="p">(</span><span class="n">output_single</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">105</span><span>    <span class="k">assert</span> <span class="n">result_batched</span> <span class="o">==</span> <span class="n">result_single</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">dp_rank</span><span class="si">=}</span><span class="s2">, </span><span class="si">{</span><span class="n">result_batched</span><span class="si">=}</span><span class="s2">, </span><span class="si">{</span><span class="n">result_single</span><span class="si">=}</span><span class="s2">"</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_batch_invariant.py#L99-L105">tests/models/test_batch_invariant.py</a> · lines 99–105</div></div>
+<p class="indent">   The helper <code>_get_result </code>collects token IDs, their logprobs, and the top-5 IDs and logprobs.
+The assertion compares the whole tuple. However, equality of the output token IDs is imposed by
+the override. The substantial numerical check is whether the model assigns the same logprobs and
+top-5 results along that history. It is not a comparison of two independent stochastic draws
+<span class="cite">[<a href="references.html#Xdeepinfer-contract-tests">77</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="what-the-override-changes"><span class="titlemark">10.3.1   </span> <a id="x1-15400010.3.1"></a>What the override changes</h4>
+<p class="noindent">The verification path in <code>Sampler._verification </code>first computes candidates, then calls
+<code>get_accept_result</code>. Its reference helper makes the override visible:
+</p><p class="indent"> <a id="ref-lst:golden_override"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.6.</b> Replace candidates and acceptance decisions for golden rows.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">237</span><span><span class="n">accept</span> <span class="o">=</span> <span class="n">raw_accept</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">238</span><span><span class="n">tokens</span> <span class="o">=</span> <span class="n">candidate_token_ids</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">239</span><span><span class="k">if</span> <span class="n">golden</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">240</span><span>    <span class="n">use_golden</span> <span class="o">=</span> <span class="n">golden</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">241</span><span>    <span class="n">accept</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">use_golden</span><span class="p">,</span> <span class="n">golden</span> <span class="o">==</span> <span class="n">draft_token_ids</span><span class="p">,</span> <span class="n">accept</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">242</span><span>    <span class="n">tokens</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">use_golden</span><span class="p">,</span> <span class="n">golden</span><span class="p">,</span> <span class="n">tokens</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">243</span><span><span class="n">blocked</span> <span class="o">=</span> <span class="o">~</span><span class="p">(</span><span class="n">is_verify</span> <span class="o">&amp;</span> <span class="n">accept</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">244</span><span><span class="n">prefix</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">([</span><span class="n">blocked</span><span class="o">.</span><span class="n">new_zeros</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span> <span class="n">blocked</span><span class="o">.</span><span class="n">cumsum</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">)])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">245</span><span><span class="n">alive</span> <span class="o">=</span> <span class="n">prefix</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="n">prefix</span><span class="p">[</span><span class="n">ftp</span><span class="p">[</span><span class="n">row_to_req</span><span class="o">.</span><span class="n">long</span><span class="p">()]</span><span class="o">.</span><span class="n">long</span><span class="p">()]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">246</span><span><span class="n">effective_accept</span> <span class="o">=</span> <span class="n">alive</span> <span class="o">&amp;</span> <span class="n">is_verify</span> <span class="o">&amp;</span> <span class="n">accept</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py#L237-L246">deepinfer/model_executor/layers/tilelang_ops/sampler.py</a> · lines 237–246</div></div>
+<p class="indent">   A golden value of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>
+means no override. Otherwise, the candidate becomes the golden token and acceptance becomes
+the test “draft equals golden”. The prefix calculation then prevents a request from accepting
+drafts beyond its first blocked row. The CUDA implementation repeats the same override before
+scanning preceding rows in <span class="path"><code>deepinfer/model_executor/layers/tilelang_ops/cuda/sampler.py</code></span>,
+lines 252–276 <span class="cite">[<a href="references.html#Xdeepinfer-golden-sampling">78</a>]</span>.
+</p><p class="indent">   For a golden continuation <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>
+and drafts <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>b</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>,
+the first draft matches, the second does not, and the output still follows
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>. The
+model’s stochastic acceptance probabilities did not decide that trajectory. This is why a
+golden-token test is useful for numerical comparison and unsuitable as evidence that rejection
+sampling preserves a distribution. Also keep these testing tokens separate from DFlash’s leading
+“golden” input: chapter 8 used that name for a committed token anchoring proposal
+generation.
+</p>
+<h4 class="subsectionHead" id="the-released-inventory"><span class="titlemark">10.3.2   </span> <a id="x1-15500010.3.2"></a>The released inventory</h4>
+<p class="noindent">The following checks vary different things. Test filenames beginning with <code>test_ </code>are under
+<span class="path"><code>tests/models/</code></span>; the references identify each fixed-version file <span class="cite">[<a href="references.html#Xdeepinfer-contract-tests">77</a>, <a href="references.html#Xdeepinfer-statistical-test">80</a>, <a href="references.html#Xdeepinfer-format-tests">82</a>, <a href="references.html#Xdeepinfer-yoco-checks">75</a>]</span>.
+</p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-36"><colgroup id="TBL-36-1g"><col id="TBL-36-1"/><col id="TBL-36-2"/><col id="TBL-36-3"/></colgroup><tr id="TBL-36-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">Check</span> </p></td><td class="td11" id="TBL-36-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Change
+  /
+  observable</span> </p></td><td class="td10" id="TBL-36-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Assertion
+  and
+  boundary</span> </p></td>
+</tr><tr id="TBL-36-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-2-1" style="text-align:left;"><p class="noindent"><span class="path"><code>test_batch_invarian
+t.py</code></span> </p></td><td class="td11" id="TBL-36-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">64
+  requests
+  /
+  one;
+  token
+  and
+  top-5
+  logprobs</span> </p></td><td class="td10" id="TBL-36-2-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Tuple
+  </span><code>==</code><span class="ec-lmr-9">;
+  single
+  replay
+  uses
+  golden
+  tokens</span> </p></td>
+</tr><tr id="TBL-36-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-3-1" style="text-align:left;"><p class="noindent"><span class="path"><code>test_ve_batch_invar
+iant.py</code></span> </p></td><td class="td11" id="TBL-36-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Image
+  batch
+  composition;
+  encoder
+  embeddings</span> </p></td><td class="td10" id="TBL-36-3-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Same
+  shapes
+  and
+  </span><code>torch.equal</code><span class="ec-lmr-9">;
+  vision
+  path</span> </p></td>
+</tr><tr id="TBL-36-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-4-1" style="text-align:left;"><p class="noindent"><span class="path"><code>test_kl.py</code></span> </p></td><td class="td11" id="TBL-36-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Incremental
+  decode
+  /
+  full
+  prefill;
+  logprobs</span> </p></td><td class="td10" id="TBL-36-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Prompt
+  lists
+  equal;
+  continuation
+  metric</span>
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-rel" stretchy="false">≤</mo><mn>0</mn></mrow></math><span class="ec-lmr-9">,
+  not
+  direct
+  equality</span> </p></td>
+</tr><tr id="TBL-36-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-5-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-9">YOCO
+L2</span> </p></td><td class="td11" id="TBL-36-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Mask
+  /
+  compact;
+  logprobs,
+  top-k,
+  optional
+  confidence</span> </p></td><td class="td10" id="TBL-36-5-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Direct
+  value
+  comparisons
+  on
+  a
+  golden
+  trajectory</span> </p></td>
+</tr><tr id="TBL-36-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-6-1" style="text-align:left;"><p class="noindent"><span class="path"><code>test_offline_infere
+nce.py</code></span> </p></td><td class="td11" id="TBL-36-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Current
+  run
+  /
+  stored
+  baseline;
+  decode
+  perplexity</span> </p></td><td class="td10" id="TBL-36-6-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Exact
+  scalar
+  equality,
+  platform
+  and
+  EP/CP
+  specific</span> </p></td>
+</tr><tr id="TBL-36-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-7-1" style="text-align:left;"><p class="noindent"><span class="path"><code>test_sampler.py</code></span> </p></td><td class="td11" id="TBL-36-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Four
+  sampling
+  settings;
+  transformed
+  samples</span> </p></td><td class="td10" id="TBL-36-7-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Aggregate
+  Kolmogorov–Smirnov
+  (KS)
+  p-value
+  above</span>
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>5</mn></mrow></msup></mrow></math><span class="ec-lmr-9">,
+  enough
+  valid
+  trajectories</span> </p></td>
+</tr><tr id="TBL-36-8-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-8-1" style="text-align:left;"><p class="noindent"><span class="path"><code>examples/_structure
+d_output.py</code></span> </p></td><td class="td11" id="TBL-36-8-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Conflicting
+  prompts
+  /
+  required
+  format</span> </p></td><td class="td10" id="TBL-36-8-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-9">Syntax,
+  normal
+  stop
+  and
+  EOS
+  at
+  temperature
+  zero</span> </p></td>
+</tr><tr id="TBL-36-9-" style="vertical-align:baseline;"><td class="td01" id="TBL-36-9-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   The vision test deserves its own row: it compares image embeddings before language-model
+sampling. It checks one image against repeated and mixed-shape batches using <code>torch.equal</code>.
+Passing a language-output comparison would not by itself identify whether that earlier
+representation was unchanged.
+</p>
+<h4 class="subsectionHead" id="decode-versus-prefill-inspect-the-metric"><span class="titlemark">10.3.3   </span> <a id="x1-15600010.3.3"></a>Decode versus prefill: inspect the metric</h4>
+<p class="noindent"><code>test_kl.py </code>uses MTP 5, context parallelism 2 and expert parallelism 8, with image input and
+batch invariance enabled. Its text tokens and golden continuation are drawn uniformly from
+non-special tokens, not from the model distribution. Sampling uses temperature 0.5 and top-p
+0.95. The first pass decodes that continuation. The second appends it to the prompt and
+obtains its logprobs through prefill. This holds the history fixed while changing how it is
+computed.
+</p><p class="indent">   The compared values are <em>processed </em>logprobs. Temperature changes the scores, top-p keeps a
+nucleus of high-probability tokens, and the remaining tokens receive zero probability. The
+sampling reference shows the order:
+</p><p class="indent"> <a id="ref-lst:processed_logprobs"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.7.</b> Transform the logits before reporting log probabilities.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">209</span><span><span class="n">logits</span><span class="o">.</span><span class="n">mul_</span><span class="p">((</span><span class="mf">1.0</span> <span class="o">/</span> <span class="n">transform_inputs</span><span class="o">.</span><span class="n">temperatures</span><span class="p">)</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">210</span><span><span class="n">apply_top_p_top_k_ref</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">transform_inputs</span><span class="o">.</span><span class="n">top_ps</span><span class="p">,</span> <span class="n">transform_inputs</span><span class="o">.</span><span class="n">top_ks</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">211</span><span><span class="n">logprobs</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">log_softmax</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/fused_sample.py#L209-L211">deepinfer/model_executor/layers/tilelang_ops/fused_sample.py</a> · lines 209–211</div></div>
+<p class="indent">   The top-p helper replaces excluded logits with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mi>∞</mi></mrow></math>, so their
+logprobs stay <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mi>∞</mi></mrow></math>.
+Prompt logprobs use the same request settings: <span class="path"><code>csrc/engine/prepare_sample.cpp</code></span>, lines
+186–188, copies temperature, top-p and top-k into the prompt arrays. The prompt-logprob helper
+passes those arrays to <code>fused_sample </code>before looking up each prompt token <span class="cite">[<a href="references.html#Xdeepinfer-contract-tests">77</a>, <a href="references.html#Xdeepinfer-sampling-inputs">59</a>]</span>.
+</p><p class="indent">   The original prompt’s logprob lists are compared directly. The continuation’s
+logprobs are converted to float32 tensors and passed to <code>cal_diff</code>; the test accepts
+its fourth field at a threshold of zero. Before either comparison, it replaces
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mi>∞</mi></mrow></math> with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>9999</mn></mrow></math>. Those
+transformations are part of what the test checks. If a token lies outside both nuclei,
+both values become the same sentinel, irrespective of their excluded logits. Such a
+position records agreement on exclusion, not agreement between finite logprobs. If nucleus
+membership differs between the runs, that normally produces a sentinel-versus-finite
+discrepancy.
+</p><p class="indent">   Uniformly chosen tokens could make these exclusions common when the model’s nucleus
+contains few vocabulary entries. The fraction depends on the model and histories; it has not been
+measured here, and the test does not report it. To assess numerical coverage, record positions
+excluded on both sides, positions retained on both sides, and membership disagreements before
+replacing infinities. Finite-position differences and exclusion agreement answer different
+questions.
+</p><p class="indent">   Two comparisons help locate this limitation. YOCO L2 uses temperature 0.5 and
+top-p 1.0, leaves top-k disabled and asserts that <span class="path"><code>DEEPINFER_SAMPLER_FORCE_TOPK</code></span> is
+zero: there is no nucleus or top-k truncation in that setup. The batch-invariance test
+instead obtains its golden tokens by sampling the batched run, rather than uniformly
+choosing vocabulary entries. Its chosen tokens therefore come from that run’s retained
+distribution; the single-request replay must match their logprobs and top-5 results. Neither
+contrast makes the selected probabilities an independent oracle for the whole model
+<span class="cite">[<a href="references.html#Xdeepinfer-yoco-checks">75</a>, <a href="references.html#Xdeepinfer-contract-tests">77</a>]</span>.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The continuation comparison has a second limitation, in the metric itself:
+</p><p class="indent"> <a id="ref-lst:logprob_metric"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.8.</b> A field named kl is computed from chosen-token logprob differences.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">4</span><span><span class="k">def</span> <span class="nf">cal_diff</span><span class="p">(</span><span class="n">x</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">y</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">5</span><span>    <span class="k">if</span> <span class="n">torch</span><span class="o">.</span><span class="n">equal</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">6</span><span>        <span class="k">return</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">7</span><span>    <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">double</span><span class="p">(),</span> <span class="n">y</span><span class="o">.</span><span class="n">double</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">8</span><span>    <span class="n">rmse</span> <span class="o">=</span> <span class="p">((</span><span class="n">x</span> <span class="o">-</span> <span class="n">y</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="n">y</span><span class="p">))</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span><span class="o">.</span><span class="n">sqrt</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">9</span><span>    <span class="n">cos_diff</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">-</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span> <span class="o">/</span> <span class="nb">max</span><span class="p">((</span><span class="n">x</span> <span class="o">*</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">(),</span> <span class="mf">1e-12</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">10</span><span>    <span class="n">chebyshev_dis</span> <span class="o">=</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">abs</span><span class="p">()</span><span class="o">.</span><span class="n">max</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">11</span><span>    <span class="n">kl</span> <span class="o">=</span> <span class="p">((</span><span class="n">torch</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="n">y</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span><span class="n">x</span> <span class="o">-</span> <span class="n">y</span><span class="p">))</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span><span class="o">.</span><span class="n">item</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">12</span><span>    <span class="k">return</span> <span class="n">cos_diff</span><span class="p">,</span> <span class="n">rmse</span><span class="p">,</span> <span class="n">chebyshev_dis</span><span class="p">,</span> <span class="n">kl</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/testing.py#L4-L12">deepinfer/testing.py</a> · lines 4–12</div></div>
+<p class="indent">   Write <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>d</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>x</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>y</mi></mrow></math>. The
+last field averages <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msup><mrow><mi>e</mi></mrow><mrow><mi>d</mi></mrow></msup> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>d</mi></mrow></math>
+over the selected tokens. A KL divergence between two categorical distributions would require
+summing over their token probabilities with the appropriate weights. This expression is a
+discrepancy measure on the supplied logprobs; its name does not make it that distributional
+divergence.
+</p><p class="indent">   In real arithmetic, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msup><mrow><mi>e</mi></mrow><mrow><mi>d</mi></mrow></msup> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>d</mi></mrow></math> is
+non-negative and zero only at <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>d</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0</mn></mrow></math>.
+Floating-point subtraction changes the conclusion. Lab 21 uses adjacent float32 values, both
+exactly representable in Python’s binary64 floats: </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>x</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mo class="MathClass-bin" stretchy="false">−</mo><mn>0.0010000000474974513</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="quad" width="1em"></mspace><mi>y</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mo class="MathClass-bin" stretchy="false">−</mo><mn>0.0009999999310821295</mn><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="quad" width="1em"></mspace><mo class="MathClass-rel" stretchy="false">|</mo><mi>x</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>y</mi><mo class="MathClass-rel" stretchy="false">|</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <msup><mrow><mn>2</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>33</mn></mrow></msup><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The lab evaluates the same scalar expression and gets zero. The original PyTorch helper also
+returns zero for these inputs on CPU despite <code>torch.equal </code>being false. The first return branch is
+sufficient for zero, but it is not necessary. To assert exact value equality, compare the values
+directly; to allow a tolerance, choose and state a metric that measures the intended
+difference.
+</p><p class="indent">   This comparison completes part of chapter 5’s recomputation story. Rebuilding decoded
+history through prefill should reconstruct compatible representations and probabilities. The test
+probes that boundary for its selected inputs and settings. It does not actually preempt and
+resume a request, and its zero metric does not prove identical continuation. Sampling state,
+auxiliary state and the cache must also be compatible. Nor does this test enable chapter 9’s
+truncated-prefill mode.
+</p>
+<h4 class="subsectionHead" id="two-other-baselines"><span class="titlemark">10.3.4   </span> <a id="x1-15700010.3.4"></a>Two other baselines</h4>
+<p class="noindent">YOCO L2 compares mask with compact under batch invariance, fixing the golden trajectory and
+checking the other relevant settings. It directly compares chosen logprobs, top-k IDs and logprobs,
+and optional DFlash confidence values. The context-parallel derivation comment in
+<span class="path"><code>deepinfer/model_executor/input_metadata/yoco.py</code></span>, lines 136–139, explicitly points to an
+end-to-end equality check. Neither a local derivation nor agreement between these two truncated
+modes measures their error against full prefill. That remains chapter 9’s separate quality
+question.
+</p><p class="indent">   The offline-inference test uses a different baseline: stored decode perplexities in
+<span class="path"><code>tests/models/offline_decode_ppl.json</code></span>. It checks the current run against those
+scalars, rather than comparing two fresh runs. The baseline is tied to the platform,
+                                                                                  
+                                                                                  
+workload and parallel configuration: NVIDIA uses EP 4 / CP 2; Ascend uses EP 16 /
+CP 8. Both have two data-parallel ranks. Changing that configuration requires a new
+baseline.
+</p><p class="indent">   For chosen-token logprobs <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>ℓ</mi></mrow><mrow><mn>1</mn></mrow></msub><mo class="MathClass-punc" stretchy="false">,</mo><mo>…</mo><mo class="MathClass-punc" stretchy="false">,</mo><msub><mrow><mi>ℓ</mi></mrow><mrow><mi>n</mi></mrow></msub></mrow></math>,
+perplexity is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">exp</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mo class="MathClass-bin" stretchy="false">−</mo><msub><mrow><mtext class="qopname">∑</mtext><mo> ⁡ </mo>
+</mrow><mrow><mi>i</mi></mrow></msub><msub><mrow><mi>ℓ</mi></mrow><mrow><mi>i</mi></mrow></msub><mo class="MathClass-bin" stretchy="false">∕</mo><mi>n</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. Lab
+21 compares <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>
+with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+Both give <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msup><mrow><mi>e</mi></mrow><mrow><mn>2</mn></mrow></msup></mrow></math>,
+although neither token’s logprob agrees. Exact equality of an aggregate is an aggregate regression
+check, not tokenwise equality.
+</p>
+<h3 class="sectionHead" id="repeatable-and-correctly-distributed-are-different-claims"><span class="titlemark">10.4   </span> <a id="x1-15800010.4"></a>Repeatable and correctly distributed are different claims</h3>
+<p class="noindent">Numerically equal probabilities are only part of repeatable sampling. A draw also consumes
+randomness. A shared stream hands its next value to whichever request happens to run next.
+Moving a request changes the value it receives.
+</p>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/22_sampling_contracts.py
+</code></pre></div>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>shared stream AB: A=0, B=1
+shared stream BA: A=1, B=0
+keyed draws: all 6 batch orders and single requests agree
+q=1, position 7: fresh target, token=1
+q=3, position 7: accepted draft, token=0
+ideal marginal in both budgets: [1/2, 1/2]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/22_sampling_contracts.txt">results/22_sampling_contracts.txt</a></div></div>
+<p class="indent">   The shared stream changes both requests’ tokens when their order is reversed. The keyed
+version survives all six orders of three requests and each request run alone. But changing a
+verification budget still changes one token, even though the toy target and draft have identical
+distributions.
+</p>
+<h4 class="subsectionHead" id="keys-belong-to-requests-positions-and-operations"><span class="titlemark">10.4.1   </span> <a id="x1-15900010.4.1"></a>Keys belong to requests, positions and operations</h4>
+<p class="noindent">The teaching generator hashes an explicit request seed and a position/role key. It uses
+SHA-256, not Python’s process-randomised <code>hash</code>, and returns an exact rational in
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 10.9.</b> A stable teaching draw, independent of the batch slot.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">19</span><span><span class="k">def</span> <span class="nf">keyed_draw</span><span class="p">(</span><span class="n">seed</span><span class="p">,</span> <span class="n">position</span><span class="p">,</span> <span class="n">role</span><span class="p">,</span> <span class="n">draft</span><span class="o">=</span><span class="kc">False</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">effective_seed</span> <span class="o">=</span> <span class="n">seed</span> <span class="o">+</span> <span class="p">(</span><span class="n">DRAFT_OFFSET</span> <span class="k">if</span> <span class="n">draft</span> <span class="k">else</span> <span class="mi">0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="n">message</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">'</span><span class="si">{</span><span class="n">effective_seed</span><span class="si">}</span><span class="s1">:</span><span class="si">{</span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">position</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">role</span><span class="si">}</span><span class="s1">'</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'ascii'</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="n">bits</span> <span class="o">=</span> <span class="nb">int</span><span class="o">.</span><span class="n">from_bytes</span><span class="p">(</span><span class="n">sha256</span><span class="p">(</span><span class="n">message</span><span class="p">)</span><span class="o">.</span><span class="n">digest</span><span class="p">()[:</span><span class="mi">8</span><span class="p">],</span> <span class="s1">'big'</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>    <span class="k">return</span> <span class="n">F</span><span class="p">(</span><span class="n">bits</span><span class="p">,</span> <span class="mi">2</span><span class="o">**</span><span class="mi">64</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/22_sampling_contracts.py">labs/22_sampling_contracts.py</a> · lines 19–23</div></div>
+<p class="indent">   DeepInfer uses its device RNG instead. The following line numbers refer to
+<span class="path"><code>deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py</code></span>. In that file, the effective
+seed is the request’s <code>seq_seed </code>plus a namespace offset. The wrapper sets that offset to zero for the default
+path and to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>007</mn></mrow></math>
+for MTP. The CUDA kernel uses three position-derived sequences <span class="cite">[<a href="references.html#Xdeepinfer-random-keys">79</a>]</span>: </p>
+<div class="center">
+
+<div class="tabular">
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-37"><colgroup id="TBL-37-1g"><col id="TBL-37-1"/><col id="TBL-37-2"/><col id="TBL-37-3"/></colgroup><tr id="TBL-37-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-37-1-1" style="text-align:left; white-space:nowrap;">Operation                       </td><td class="td11" id="TBL-37-1-2" style="text-align:left; white-space:nowrap;"> RNG sequence                                                                                                     </td><td class="td10" id="TBL-37-1-3" style="text-align:left; white-space:nowrap;"> <span class="path"><code>cuda/fused_sample.py</code></span> line</td>
+</tr><tr id="TBL-37-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-37-2-1" style="text-align:left; white-space:nowrap;">Fresh target sample           </td><td class="td11" id="TBL-37-2-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>3</mn><mi>p</mi></mrow></math> </td><td class="td10" id="TBL-37-2-3" style="text-align:left; white-space:nowrap;"> 450                                 </td>
+</tr><tr id="TBL-37-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-37-3-1" style="text-align:left; white-space:nowrap;">Rejected-draft replacement  </td><td class="td11" id="TBL-37-3-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>3</mn><mi>p</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math> </td><td class="td10" id="TBL-37-3-3" style="text-align:left; white-space:nowrap;"> 481                                 </td>
+</tr><tr id="TBL-37-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-37-4-1" style="text-align:left; white-space:nowrap;">Accept/reject draw            </td><td class="td11" id="TBL-37-4-2" style="text-align:left; white-space:nowrap;"> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>3</mn><mi>p</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn></mrow></math> </td><td class="td10" id="TBL-37-4-3" style="text-align:left; white-space:nowrap;"> 392                                 </td>
+</tr></table></div> </div></div>
+<p class="noindent">Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math> is
+the kernel’s <code>sample_positions </code>field. The seed is selected at line 227. Batch slot is not part of
+these RNG keys.
+</p><p class="indent">   There is an important intermediate transformation. For packed verification rows,
+<code>process_sampling </code>expands the per-request parameters using <code>row_to_req </code>and <code>local_step</code>. Its
+reference expansion is:
+</p><p class="indent"> <a id="ref-lst:position_keys"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.10.</b> Preserve the request seed and mix in its local verification offset.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">61</span><span><span class="n">req</span> <span class="o">=</span> <span class="n">row_to_req</span><span class="o">.</span><span class="n">long</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">62</span><span><span class="k">return</span> <span class="n">SamplingKernelInputs</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">63</span><span>    <span class="n">LogitsTransformInputs</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">logits</span><span class="o">.</span><span class="n">temperatures</span><span class="p">[</span><span class="n">req</span><span class="p">],</span> <span class="n">params</span><span class="o">.</span><span class="n">logits</span><span class="o">.</span><span class="n">top_ps</span><span class="p">[</span><span class="n">req</span><span class="p">],</span> <span class="n">params</span><span class="o">.</span><span class="n">logits</span><span class="o">.</span><span class="n">top_ks</span><span class="p">[</span><span class="n">req</span><span class="p">]),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">64</span><span>    <span class="n">params</span><span class="o">.</span><span class="n">seq_seeds</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">int64</span><span class="p">)[</span><span class="n">req</span><span class="p">]</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">uint64</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">65</span><span>    <span class="n">params</span><span class="o">.</span><span class="n">sample_positions</span><span class="p">[</span><span class="n">req</span><span class="p">]</span> <span class="o">+</span> <span class="n">local_step</span> <span class="o">*</span> <span class="n">DRAFT_POS_HASH_MUL</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">66</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py#L61-L66">deepinfer/model_executor/layers/tilelang_ops/sampler.py</a> · lines 61–66</div></div>
+<p class="indent"> <code>DRAFT_POS_HASH_MUL </code>is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>10</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>000</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>019</mn></mrow></math>,
+not 1. Thus <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math>
+is not always a literal absolute token index. Reordering requests while preserving their local work
+preserves this construction; changing local verification positions need not. DFlash separately
+forms proposal positions from the base, the last valid offset and the draft index, then
+samples in the MTP seed domain. The lab deliberately uses simple absolute positions to
+isolate the role/domain change. It reproduces neither this position mixing nor the device
+generator.
+</p>
+<h4 class="subsectionHead" id="why-the-budget-matters-even-with-a-fixed-seed"><span class="titlemark">10.4.2   </span> <a id="x1-16000010.4.2"></a>Why the budget matters even with a fixed seed</h4>
+<p class="noindent">Chapter 8’s timing curve influences the total verification budget and each request’s query count.
+The sampling metadata determines the role of each row:
+</p><p class="indent"> <a id="ref-lst:verification_roles"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.11.</b> The final query draws afresh; preceding queries verify drafts.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">18</span><span><span class="n">row_to_req</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">repeat_interleave</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">19</span><span>    <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">ftp</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">ftp</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">ftp</span><span class="o">.</span><span class="n">device</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">20</span><span>    <span class="n">seqlen_q</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="n">output_size</span><span class="o">=</span><span class="n">total_q</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span><span class="n">local_step</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">total_q</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">ftp</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">ftp</span><span class="o">.</span><span class="n">device</span><span class="p">)</span> <span class="o">-</span> <span class="n">ftp</span><span class="p">[</span><span class="n">row_to_req</span><span class="o">.</span><span class="n">long</span><span class="p">()]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span><span class="n">is_verify</span> <span class="o">=</span> <span class="n">local_step</span> <span class="o">!=</span> <span class="n">seqlen_q</span><span class="p">[</span><span class="n">row_to_req</span><span class="o">.</span><span class="n">long</span><span class="p">()]</span> <span class="o">-</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span><span class="k">return</span> <span class="n">row_to_req</span><span class="p">,</span> <span class="n">local_step</span><span class="p">,</span> <span class="n">is_verify</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sampler.py#L18-L25">deepinfer/model_executor/layers/tilelang_ops/sampler.py</a> · lines 18–25</div></div>
+<p class="indent">   For a query count <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn></mrow></math>,
+local row 0 is the final row and takes a fresh target sample. For
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>3</mn></mrow></math>, rows 0
+and 1 verify drafts, while row 2 draws afresh. At the same output position, the first
+run may use a target draw and the second an accepted proposal drawn earlier in the
+MTP namespace. Equal seeds do not make those two operations consume the same
+randomness.
+</p><p class="indent">   Lab 22 sets target and draft probabilities to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>,
+making every draft acceptable. Its budget loop follows that final-row rule:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 10.12.</b> Changing q changes which operation produces a position.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">39</span><span><span class="k">def</span> <span class="nf">budget_output</span><span class="p">(</span><span class="n">seed</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">q</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span>    <span class="c1"># q-1 verified drafts, then one fresh target draw, as in the metadata rule.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span>    <span class="n">output</span><span class="p">,</span> <span class="n">roles</span> <span class="o">=</span> <span class="p">{},</span> <span class="p">{}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span>    <span class="k">for</span> <span class="n">local</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">q</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span>        <span class="n">position</span> <span class="o">=</span> <span class="n">start</span> <span class="o">+</span> <span class="n">local</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span>        <span class="n">verify</span> <span class="o">=</span> <span class="n">local</span> <span class="o">!=</span> <span class="n">q</span> <span class="o">-</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">45</span><span>        <span class="k">if</span> <span class="n">verify</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">46</span><span>            <span class="n">draft</span> <span class="o">=</span> <span class="n">token</span><span class="p">(</span><span class="n">keyed_draw</span><span class="p">(</span><span class="n">seed</span><span class="p">,</span> <span class="n">position</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">draft</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">47</span><span>            <span class="k">assert</span> <span class="n">keyed_draw</span><span class="p">(</span><span class="n">seed</span><span class="p">,</span> <span class="n">position</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">1</span>  <span class="c1"># target/draft ratio = 1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">48</span><span>            <span class="n">output</span><span class="p">[</span><span class="n">position</span><span class="p">],</span> <span class="n">roles</span><span class="p">[</span><span class="n">position</span><span class="p">]</span> <span class="o">=</span> <span class="n">draft</span><span class="p">,</span> <span class="s1">'accepted draft'</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">49</span><span>        <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">50</span><span>            <span class="n">output</span><span class="p">[</span><span class="n">position</span><span class="p">]</span> <span class="o">=</span> <span class="n">token</span><span class="p">(</span><span class="n">keyed_draw</span><span class="p">(</span><span class="n">seed</span><span class="p">,</span> <span class="n">position</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">51</span><span>            <span class="n">roles</span><span class="p">[</span><span class="n">position</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'fresh target'</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">52</span><span>    <span class="k">return</span> <span class="n">output</span><span class="p">,</span> <span class="n">roles</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/22_sampling_contracts.py">labs/22_sampling_contracts.py</a> · lines 39–52</div></div>
+<p class="indent">   With seed 11 at position 7, a fresh target draw produces token 1; the accepted draft
+produces token 0. Under ideal uniform draws each rule still has exactly the distribution
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+Equality of marginal distributions does not require equality for a particular seed. The SHA-256
+example supplies a concrete repeatability counterexample; the marginal statement
+follows from the two sampling rules, not a claim that a finite list of hash outputs proves
+uniformity.
+</p><p class="indent">   This gives a source-based explanation for the README recipe: enable <span class="path"><code>DEEPINFER_BATCH_INVARIANT</code></span>,
+disable <span class="path"><code>DEEPINFER_ENABLE_MTP_VARLEN</code></span>, and provide a fixed <code>SamplingParams.seq_seed</code>
+on NVIDIA. Measured timings can change the budget; the budget can change the
+sampling operation and its keys. This does not mean every timing perturbation changes a
+token.
+</p><p class="indent">   No end-to-end test of that complete recipe was found in the inspected <span class="path"><code>tests/models/</code></span>
+inventory: none sets <code>seq_seed</code>. Embedded sampler and RNG kernel tests are different checks. The
+evaluation driver supplies per-sample seeds but initially sets varlen to 1; its later <code>–env </code>loop can
+                                                                                  
+                                                                                  
+override that value. Its default setup is therefore not the README’s recipe. Seeds alone, or the
+helper’s repeatability docstring, do not establish that those evaluation runs are repeatable
+<span class="cite">[<a href="references.html#Xdeepinfer-random-keys">79</a>]</span>.
+</p>
+<h4 class="subsectionHead" id="test-the-probabilities-not-just-the-seed"><span class="titlemark">10.4.3   </span> <a id="x1-16100010.4.3"></a>Test the probabilities, not just the seed</h4>
+<p class="noindent"><code>test_sampler.py </code>asks whether the sampled tokens agree statistically
+with their reported probabilities. It uses MTP 5 and four settings
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mi>T</mi><mo class="MathClass-punc" stretchy="false">,</mo><mstyle class="text"><mtext>top-p</mtext></mstyle><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mo class="MathClass-open" stretchy="false">(</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.95</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.95</mn><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, with
+128 trajectories per setting and up to 2,048 output tokens per trajectory <span class="cite">[<a href="references.html#Xdeepinfer-statistical-test">80</a>]</span>. It does not force a
+golden continuation.
+</p><p class="indent">   A categorical sample is not a uniform number. A <em>randomised probability integral transform</em>
+(PIT) turns it into one under the target distribution. Order the tokens, give token
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi></mrow></math> an interval
+of width <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>p</mi></mrow><mrow><mi>x</mi></mrow></msub></mrow></math>,
+and let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+be the interval’s upper end. Given the sampled token, draw an independent uniform
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>U</mi></mrow></math> and
+form </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>Z</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>F</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>U</mi><msub><mrow><mi>p</mi></mrow><mrow><mi>x</mi></mrow></msub><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   If token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi></mrow></math> is chosen
+with probability <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>p</mi></mrow><mrow><mi>x</mi></mrow></msub></mrow></math>,
+that probability is spread uniformly over an interval of the same width. The intervals together fill
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>
+uniformly. The construction works conditionally on each token’s history; the probabilities can
+change between positions.
+                                                                                  
+                                                                                  
+</p><p class="indent">   DeepInfer calls the upper endpoint <code>sum_smaller_probs</code>. It sorts by ascending probability,
+breaking ties by column index, and <em>includes </em>the sampled token. Its reference calculation makes
+the tie rule explicit:
+</p><p class="indent"> <a id="ref-lst:pit_cdf"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.13.</b> Build an inclusive CDF in probability order.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">38</span><span><span class="n">pivot</span> <span class="o">=</span> <span class="n">logprobs</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">sample_results</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">39</span><span><span class="n">mask_less</span> <span class="o">=</span> <span class="n">logprobs</span> <span class="o">&lt;</span> <span class="n">pivot</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">40</span><span><span class="n">col_idx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">logprobs</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">device</span><span class="o">=</span><span class="n">logprobs</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">41</span><span><span class="n">mask_equal_before</span> <span class="o">=</span> <span class="p">(</span><span class="n">logprobs</span> <span class="o">==</span> <span class="n">pivot</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">col_idx</span> <span class="o">&lt;=</span> <span class="n">sample_results</span><span class="o">.</span><span class="n">unsqueeze</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">42</span><span><span class="n">out</span> <span class="o">=</span> <span class="p">(</span><span class="n">logprobs</span><span class="o">.</span><span class="n">exp</span><span class="p">()</span> <span class="o">*</span> <span class="p">(</span><span class="n">mask_less</span> <span class="o">|</span> <span class="n">mask_equal_before</span><span class="p">))</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">43</span><span><span class="n">out</span><span class="o">.</span><span class="n">masked_fill_</span><span class="p">(</span><span class="n">invalid</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">44</span><span><span class="k">return</span> <span class="n">out</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/sum_smaller_probs.py#L38-L44">deepinfer/model_executor/layers/tilelang_ops/sum_smaller_probs.py</a> · lines 38–44</div></div>
+<p class="indent">   Lab 22 uses target probabilities <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+The token order is 1, 2, 0, with intervals <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+A biased sampler instead chooses token IDs 0, 1 and 2 with probabilities
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>3</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>4</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>8</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>8</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. Exact
+interval calculations give:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>PIT quarter masses, correct: 1/4, 1/4, 1/4, 1/4
+PIT quarter masses, biased:  1/8, 1/8, 3/8, 3/8
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/22_sampling_contracts.txt">results/22_sampling_contracts.txt</a></div></div>
+<p class="indent">   The correct sampler places a quarter of its PIT mass in each quarter of the unit interval. The
+biased sampler places too much in the upper half. These are exact rational mass calculations, not
+a histogram or a run of DeepInfer’s statistical test.
+</p><p class="indent">   The released test filters the arrays before constructing PIT values and calling a
+Kolmogorov–Smirnov (KS) check:
+</p><p class="indent"> <a id="ref-lst:pit_transform"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.14.</b> Transform a trajectory before checking uniformity.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">83</span><span><span class="n">ssp_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">ssp</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">84</span><span><span class="n">p_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">log_probs</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">85</span><span><span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">ssp_arr</span><span class="p">))</span> <span class="ow">and</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">p_arr</span><span class="p">))</span> <span class="ow">and</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">p_arr</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">86</span><span>    <span class="k">return</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">87</span><span><span class="k">if</span> <span class="p">(</span><span class="n">ssp_arr</span> <span class="o">-</span> <span class="n">p_arr</span> <span class="o">&lt;</span> <span class="o">-</span><span class="mf">0.01</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">88</span><span>    <span class="k">return</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">89</span><span><span class="n">rng</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">RandomState</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">90</span><span><span class="n">u</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">ssp_arr</span> <span class="o">-</span> <span class="n">p_arr</span> <span class="o">*</span> <span class="n">rng</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="n">n</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">91</span><span><span class="n">ks_stat</span><span class="p">,</span> <span class="n">ks_quantile</span> <span class="o">=</span> <span class="n">ks_test_uniform</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">tolist</span><span class="p">())</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">92</span><span><span class="k">if</span> <span class="n">ks_stat</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">93</span><span>    <span class="k">return</span> <span class="kc">None</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">94</span><span><span class="k">return</span> <span class="n">ks_stat</span><span class="p">,</span> <span class="n">ks_quantile</span><span class="p">,</span> <span class="n">n</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_sampler.py#L83-L94">tests/models/test_sampler.py</a> · lines 83–94</div></div>
+<p class="indent">   KS measures the largest gap between the sample’s cumulative distribution and the uniform
+CDF. The helper turns that gap into an approximate p-value using an asymptotic formula with a
+finite-sample correction. A p-value describes how unusual such a discrepancy would be under the
+null model; it is not the probability that the sampler is correct. The helper returns a p-value
+under the name <code>ks_quantile</code>. A second KS check compares those trajectory-level values with a
+uniform distribution.
+</p><p class="indent">   The actual failure gate is short:
+</p><p class="indent"> <a id="ref-lst:sampler_assertion"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.15.</b> Only the all-trajectory aggregate decides statistical failure.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">242</span><span><span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_quantiles</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">243</span><span>    <span class="n">errors</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"DP </span><span class="si">{</span><span class="n">dp_rank</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">config_name</span><span class="si">}</span><span class="s2">: no valid trajectories for all, skip=</span><span class="si">{</span><span class="n">skip_counts</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">244</span><span><span class="k">elif</span> <span class="n">all_pv</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">245</span><span>    <span class="n">errors</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"DP </span><span class="si">{</span><span class="n">dp_rank</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">config_name</span><span class="si">}</span><span class="s2">: computing the all p_value failed"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">246</span><span><span class="k">elif</span> <span class="n">all_pv</span> <span class="o">&lt;=</span> <span class="mf">1e-5</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">247</span><span>    <span class="n">errors</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">"DP </span><span class="si">{</span><span class="n">dp_rank</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">config_name</span><span class="si">}</span><span class="s2">: all p_value=</span><span class="si">{</span><span class="n">all_pv</span><span class="si">}</span><span class="s2"> is too small; the sampler may have a problem"</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/tests/models/test_sampler.py#L242-L247">tests/models/test_sampler.py</a> · lines 242–247</div></div>
+<p class="indent"> <code>all_pv </code>uses the whole trajectories. The test also prints <code>next1_pv</code>, based on tokens after steps
+marked by <code>draft_tok</code>, but does not reject on that value. The filtering is consequential: if <em>any </em>position
+has <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mstyle class="text"><mtext class="texttt" mathvariant="monospace">ssp</mtext></mstyle><mo class="MathClass-bin" stretchy="false">−</mo> <mi>p</mi> <mo class="MathClass-rel" stretchy="false">&lt;</mo> <mo class="MathClass-bin" stretchy="false">−</mo><mn>0.01</mn></mrow></math>, the
+helper returns <code>None </code>and that whole trajectory is omitted, not failed. An inclusive CDF should satisfy
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mstyle class="text"><mtext class="texttt" mathvariant="monospace">ssp</mtext></mstyle> <mo class="MathClass-rel" stretchy="false">≥</mo> <mi>p</mi></mrow></math>; the tolerance
+filter can therefore discard evidence of the very probability inconsistency being investigated. The helper
+also omits missing or non-finite data and non-positive probabilities, then clips the surviving PIT
+values to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+If fewer than two valid trajectory-level values remain, the aggregate is unavailable and the test
+fails. Otherwise, the aggregate may pass despite discarded trajectories.
+</p><p class="indent">   Passing means this finite test did not detect a discrepancy at its threshold. It cannot prove
+exact distributional equality or exclude chapter 8’s small, deliberate residual penalty. There is
+another uncovered claim: PIT compares samples with the distribution the engine reports after its
+transformations. If temperature or top-p is applied wrongly, both sampling and the
+reported probabilities could use the same wrong transformed logits and still pass. An
+independent check of the transformations would be needed to detect that error. This
+test also does not enable structured output, which adds another transformation of the
+distribution.
+</p>
+<h3 class="sectionHead" id="a-grammar-narrows-the-distribution"><span class="titlemark">10.5   </span> <a id="x1-16200010.5"></a>A grammar narrows the distribution</h3>
+<p class="noindent">A grammar allows only certain continuations of the text already accepted. DeepInfer represents
+the allowed token IDs as a bitmask. Its sampler applies that mask to the logits before sampling
+and draft verification:
+</p><p class="indent"> <a id="ref-lst:grammar_mask"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.16.</b> Apply each grammar mask to its request and speculative position.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">428</span><span><span class="n">ftp</span> <span class="o">=</span> <span class="n">decode_inputs</span><span class="o">.</span><span class="n">mtp_first_token_positions</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">429</span><span><span class="n">seqlen_q</span> <span class="o">=</span> <span class="n">decode_inputs</span><span class="o">.</span><span class="n">mtp_seqlens_q</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">430</span><span><span class="n">row_to_req</span><span class="p">,</span> <span class="n">local_step</span><span class="p">,</span> <span class="n">is_verify</span> <span class="o">=</span> <span class="n">prepare_verification_metadata</span><span class="p">(</span><span class="n">ftp</span><span class="p">,</span> <span class="n">seqlen_q</span><span class="p">,</span> <span class="n">total_q</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_MTP_value</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">431</span><span><span class="n">speculative_inputs</span> <span class="o">=</span> <span class="n">driver_inputs</span><span class="o">.</span><span class="n">speculative</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">432</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">433</span><span><span class="c1"># Apply structured-output masks before sampling and draft verification.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">434</span><span><span class="k">if</span> <span class="n">so_indices</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">435</span><span>    <span class="k">for</span> <span class="n">step</span><span class="p">,</span> <span class="n">indices</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">so_indices</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">436</span><span>        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">indices</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">437</span><span>            <span class="n">apply_token_bitmask_by_step_inplace</span><span class="p">(</span><span class="n">logits</span><span class="p">,</span> <span class="n">so_bitmasks</span><span class="p">[</span><span class="n">step</span><span class="p">],</span> <span class="n">indices</span><span class="p">,</span> <span class="n">ftp</span><span class="p">,</span> <span class="n">step</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L428-L437">deepinfer/model_executor/layers/sampler.py</a> · lines 428–437</div></div>
+<p class="indent">   For an allowed set <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>S</mi></mrow></math>,
+simple masking and renormalisation would turn a distribution
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math> into
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><msub><mrow><mi class="MathClass-op">∑</mi><mo> ⁡</mo>
+</mrow><mrow><mi>y</mi><mo class="MathClass-rel" stretchy="false">∈</mo><mi>S</mi></mrow></msub><mi>p</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>y</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> for
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi> <mo class="MathClass-rel" stretchy="false">∈</mo> <mi>S</mi></mrow></math>, and
+zero elsewhere. That describes a probability contract only after defining the order of masking,
+temperature, top-k/top-p and speculative correction. A format test alone cannot establish this
+distribution. DeepInfer places the grammar mask before <code>process_sampling</code>, whose
+transformations and verification we traced in chapter 8.
+</p>
+<h4 class="subsectionHead" id="the-mask-belongs-to-a-tentative-history"><span class="titlemark">10.5.1   </span> <a id="x1-16300010.5.1"></a>The mask belongs to a tentative history</h4>
+<p class="noindent">The grammar compiler and matcher are provided by the external XGrammar library, pinned as
+<code>xgrammar==0.2.2</code>. DeepInfer’s wrapper in <span class="path"><code>deepinfer/structure_output/matcher.py</code></span> owns
+trigger progress, bound-token state, EOS bookkeeping and rollback. Unlike the independent
+DeepSeek kernel repositories, XGrammar is an external project supplying grammar machinery.
+DeepInfer supplies the integration with speculative requests <span class="cite">[<a href="references.html#Xdeepinfer-grammar-runtime">81</a>]</span>.
+</p><p class="indent">   On the host, <code>Sampler._get_so_mask </code>first advances the matcher with the previous step’s
+accepted tokens and final output. Status 1 marks initial setup; status 2 enables subsequent
+updates:
+</p><p class="indent"> <a id="ref-lst:grammar_commit"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.17.</b> Commit actual output before constructing the next masks.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">351</span><span><span class="k">try</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">352</span><span>    <span class="k">if</span> <span class="n">so_status</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">353</span><span>        <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">seq_metadata</span><span class="o">.</span><span class="n">last_accepted_token</span> <span class="o">+</span> <span class="p">[</span><span class="n">seq_metadata</span><span class="o">.</span><span class="n">last_output_token</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">354</span><span>            <span class="k">if</span> <span class="ow">not</span> <span class="n">matcher</span><span class="o">.</span><span class="n">accept_token</span><span class="p">(</span><span class="n">token</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">355</span><span>                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"matcher rejected step token </span><span class="si">{</span><span class="n">token</span><span class="si">}</span><span class="s2">, upstream invariant broken"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">356</span><span>    <span class="k">elif</span> <span class="n">so_status</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">357</span><span>        <span class="n">so_status</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="mi">2</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">358</span><span>    <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">359</span><span>        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unexpected so_status </span><span class="si">{</span><span class="n">so_status</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L351-L359">deepinfer/model_executor/layers/sampler.py</a> · lines 351–359</div></div>
+<p class="indent">   Now suppose a teaching grammar permits <code>ab!</code>, <code>ad!</code>, <code>cb! </code>and <code>cd!</code>,
+with one character per token. Before any output, the mask allows
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">{</mo><mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>c</mi><mo class="MathClass-close" stretchy="false">}</mo></mrow></math>. Proposed drafts
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>a</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>b</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow></math> require two later
+masks: after <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>,
+allow <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">{</mo><mi>b</mi><mo class="MathClass-punc" stretchy="false">,</mo><mi>d</mi><mo class="MathClass-close" stretchy="false">}</mo></mrow></math>;
+after <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">ab</mi></mrow></math>,
+allow <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="MathClass-open" stretchy="false">{!}</mtext></mrow></math>.
+Those masks assume a prefix that has not yet passed target verification (Figure <a href="chapter-10.html#ref-fig:matcher-rollback">10.2</a>).
+</p>
+<figure class="figure"><a id="ref-fig:matcher-rollback"></a>
+<p class="noindent" id="-a-teaching-grammar-with-character-tokens-saved-masks-describe-tentative-prefixes-the-persistent-matcher-returns-to-committed-state"><a aria-label="Open figure at full size" class="figure-image" href="webbook25x.svg" rel="noopener" target="_blank"><img alt="Figure 10.2: A teaching grammar with character tokens. Saved masks describe tentative
+prefixes; the persistent matcher returns to committed state." loading="lazy" src="webbook25x.svg"/></a>
+<a id="x1-163001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 10.2: </span><span class="content">A teaching grammar with character tokens. Saved masks describe tentative
+prefixes; the persistent matcher returns to committed state.
+</span></figcaption>
+
+</figure>
+<p class="indent">   DeepInfer fills the mask for position 0, then tentatively advances through the drafts. This is
+the start of that loop:
+</p><p class="indent"> <a id="ref-lst:grammar_advance"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.18.</b> Construct later masks by accepting a speculative prefix.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">366</span><span><span class="n">num_accepted_steps</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">367</span><span><span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">draft_token</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">seq_metadata</span><span class="o">.</span><span class="n">last_next_n_token</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">368</span><span>    <span class="k">if</span> <span class="n">matcher</span><span class="o">.</span><span class="n">accept_token</span><span class="p">(</span><span class="n">draft_token</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">369</span><span>        <span class="k">if</span> <span class="n">matcher</span><span class="o">.</span><span class="n">constrained</span><span class="p">():</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">370</span><span>            <span class="n">mask_filled</span> <span class="o">=</span> <span class="n">matcher</span><span class="o">.</span><span class="n">fill_vocab_mask</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">bitmasks_cpu</span><span class="p">[</span><span class="n">k</span> <span class="o">+</span> <span class="mi">1</span><span class="p">],</span> <span class="n">idx</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L366-L370">deepinfer/model_executor/layers/sampler.py</a> · lines 366–370</div></div>
+<p class="indent">   The omitted lines 371–372 assert that filling succeeded and register the request’s mask index.
+The loop then counts successful tentative accepts and restores the matcher:
+</p><p class="indent"> <a id="ref-lst:grammar_rollback"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.19.</b> Undo tentative advances, including when a later draft fails.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">373</span><span>        <span class="n">num_accepted_steps</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">374</span><span>    <span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">375</span><span>        <span class="k">break</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">376</span><span><span class="n">matcher</span><span class="o">.</span><span class="n">rollback</span><span class="p">(</span><span class="n">num_accepted_steps</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L373-L376">deepinfer/model_executor/layers/sampler.py</a> · lines 373–376</div></div>
+<p class="indent">   If verification rejects <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>
+and selects <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>c</mi></mrow></math>, the next
+host update commits <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>c</mi></mrow></math>,
+not <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="italic">ab</mi></mrow></math>. If it
+accepts <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math> but
+rejects <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>b</mi></mrow></math>, it
+commits <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>
+and the replacement token. The saved mask for a later row is usable only along the speculative
+prefix for which it was built; accepted-prefix logic prevents later candidates from becoming output
+after an earlier rejection.
+</p><p class="indent">   The wrapper’s rollback capacity is <code>nextn+2</code>. Its <code>rollback </code>method restores the inner matcher’s
+state and the wrapper’s trigger/EOS/bound bookkeeping. The extra two positions are an
+implementation allowance; the constant alone does not establish why precisely two are
+required. What matters for this path is that tentative advancement and restoration stay
+paired.
+</p>
+<h4 class="subsectionHead" id="failure-ends-the-request"><span class="titlemark">10.5.2   </span> <a id="x1-16400010.5.2"></a>Failure ends the request</h4>
+<p class="noindent">A compilation future can time out or fail. Its wrapper returns an aborted matcher. When
+the engine enqueues a request with such a matcher, it marks <code>FINISHED_SO_FAILED </code>in
+<span class="path"><code>deepinfer/engine/llm_engine.py</code></span>, lines 621–622. During sampling, a missing or aborted matcher sets
+<code>so_status </code>to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math>;
+runtime exceptions also mark it aborted and set that status. The scheduler closes the path by
+checking the stored status:
+</p><p class="indent"> <a id="ref-lst:grammar_failure"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.20.</b> A recorded grammar failure becomes a terminal sequence status.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">976</span><span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">seq</span><span class="p">.</span><span class="n">structured_output</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">977</span><span><span class="w">    </span><span class="n">seq</span><span class="p">.</span><span class="n">schedule</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SequenceStatus</span><span class="o">::</span><span class="n">FINISHED_SO_FAILED</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">978</span><span><span class="w">    </span><span class="n">seq</span><span class="p">.</span><span class="n">append_token_id</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">979</span><span><span class="w">    </span><span class="n">seq</span><span class="p">.</span><span class="n">append_compressed_token_id</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">980</span><span><span class="w">    </span><span class="n">token_cnt</span><span class="o">++</span><span class="p">;</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/scheduler.hpp#L976-L980">csrc/engine/scheduler.hpp</a> · lines 976–980</div></div>
+<p class="indent">   The two appended zero IDs are the scheduler’s failure bookkeeping. The branch marks the
+sequence failed instead of continuing unrestricted generation. The preceding comment explicitly
+says to consult the stored status, not only the report for this step: a step with no active
+structured-output work may report no status (<em>author’s translation</em>). A missing report must not
+erase an earlier failure.
+</p><p class="indent">   This is also the boundary of chapter 5’s preemption discussion. The scheduler sets
+<code>so_blocks_recompute </code>whenever structured-output status is nonzero. Such a request terminates
+on preemption even if ordinary requests would be recomputed. Restoring KV would not, by
+itself, restore the matcher and its trigger history. Reconstructing that state would be a
+requirement for a new recovery implementation, not a feature present in this release.
+The speculative rollback above is implemented; preemption recovery of the matcher is
+not.
+</p>
+<h4 class="subsectionHead" id="where-the-constraint-begins-and-what-the-tests-cover"><span class="titlemark">10.5.3   </span> <a id="x1-16500010.5.3"></a>Where the constraint begins, and what the tests cover</h4>
+<p class="noindent">A trigger can leave an initial part of the output unconstrained. Once its token sequence
+matches, the grammar takes over. A bound token has a more specific meaning: if it
+fires while the trigger is pending, the wrapper forces the remaining trigger tokens and
+then enters the grammar. It is not an ending delimiter that releases the constraint.
+These rules live in <code>accept_token </code>and <code>fill_vocab_mask</code>, with their state included in
+rollback.
+</p><p class="indent">   The released structured-output example supplies three prompts asking for incompatible
+formats, then requests a regex, a JSON schema and an EBNF grammar. All use temperature
+zero. It requires nonempty output, a normal <code>stop </code>finish reason and a final EOS token before
+decoding the text.
+</p><p class="indent">   The format checks are explicit:
+</p><p class="indent"> <a id="ref-lst:grammar_check"></a></p><div class="code-card source-code"><div class="listing-title"><b>Listing 10.21.</b> Check the returned text against the requested format.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">54</span><span><span class="k">if</span> <span class="n">schema_type</span> <span class="o">==</span> <span class="s2">"regex"</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">55</span><span>    <span class="k">assert</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">so_args</span><span class="p">[</span><span class="s2">"schema"</span><span class="p">],</span> <span class="n">text</span><span class="p">),</span> <span class="sa">f</span><span class="s2">"regex: </span><span class="si">{</span><span class="n">text</span><span class="si">!r}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">56</span><span><span class="k">elif</span> <span class="n">schema_type</span> <span class="o">==</span> <span class="s2">"json"</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">57</span><span>    <span class="n">value</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">text</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">58</span><span>    <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">set</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">==</span> <span class="p">{</span><span class="s2">"color"</span><span class="p">,</span> <span class="s2">"count"</span><span class="p">},</span> <span class="sa">f</span><span class="s2">"json: </span><span class="si">{</span><span class="n">text</span><span class="si">!r}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">59</span><span>    <span class="k">assert</span> <span class="n">value</span><span class="p">[</span><span class="s2">"color"</span><span class="p">]</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"red"</span><span class="p">,</span> <span class="s2">"green"</span><span class="p">,</span> <span class="s2">"blue"</span><span class="p">},</span> <span class="sa">f</span><span class="s2">"json: </span><span class="si">{</span><span class="n">text</span><span class="si">!r}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">60</span><span>    <span class="k">assert</span> <span class="nb">type</span><span class="p">(</span><span class="n">value</span><span class="p">[</span><span class="s2">"count"</span><span class="p">])</span> <span class="ow">is</span> <span class="nb">int</span> <span class="ow">and</span> <span class="n">value</span><span class="p">[</span><span class="s2">"count"</span><span class="p">]</span> <span class="ow">in</span> <span class="p">{</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">},</span> <span class="sa">f</span><span class="s2">"json: </span><span class="si">{</span><span class="n">text</span><span class="si">!r}</span><span class="s2">"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">61</span><span><span class="k">else</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">62</span><span>    <span class="k">assert</span> <span class="n">schema_type</span> <span class="o">==</span> <span class="s2">"ebnf"</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">63</span><span>    <span class="k">assert</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="sa">r</span><span class="s2">"answer=(yes|no);level=[1-3]"</span><span class="p">,</span> <span class="n">text</span><span class="p">),</span> <span class="sa">f</span><span class="s2">"ebnf: </span><span class="si">{</span><span class="n">text</span><span class="si">!r}</span><span class="s2">"</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/examples/_structured_output.py#L54-L63">examples/_structured_output.py</a> · lines 54–63</div></div>
+<p class="indent">   The JSON case checks keys, allowed values and a strict integer type. The EBNF case checks
+the resulting text with a full-match regex. The offline-inference test explicitly invokes these
+examples. They establish these syntax and termination checks, not stochastic masked-distribution
+correctness, factual accuracy, or coverage of every trigger, timeout and rollback path.
+The sampling KS test does not use structured output, so its result cannot fill that
+gap.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next9"><span class="titlemark">10.6   </span> <a id="x1-16600010.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-166002x1">Change lab 21 to keep two reduction lanes for every batch size. Does batch equality
+     return? Does the result have to equal the one-lane result? Explain why numerical
+     consistency and an exact-arithmetic answer differ.
+     </li>
+<li class="enumerate" id="x1-166004x2">Replace the zero-metric check with an assertion that matches an exact value-equality
+     contract. Then propose a separate check for a stated absolute tolerance. What should
+     either check do with non-finite values?
+     </li>
+<li class="enumerate" id="x1-166006x3">Construct two different three-token logprob lists with equal perplexity. Which test in
+     the inventory could distinguish them directly?
+     </li>
+<li class="enumerate" id="x1-166008x4">For one request with four candidate rows, mark the verified rows and fresh row.
+     Reduce its budget to two. Identify which operation changes at the second row and
+     which parts of the RNG key are relevant.
+     </li>
+<li class="enumerate" id="x1-166010x5">In the grammar diagram, accept <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi></mrow></math>,
+     reject <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>b</mi></mrow></math>,
+     and choose <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>d</mi></mrow></math>.
+     Trace the matcher’s tentative state, rollback state and next committed state. What
+     additional state would a preemption/recompute implementation need?
+     </li>
+<li class="enumerate" id="x1-166012x6">Complete  this  template  for  a  released  test  and  for  a  proposed  end-to-end
+     deterministic-sampling test. Include the model and hardware configuration; do not
+     treat a recipe as an executed test.</li></ol>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-40"><colgroup id="TBL-40-1g"><col id="TBL-40-1"/><col id="TBL-40-2"/></colgroup><tr id="TBL-40-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-1-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Field                </span></td><td class="td10" id="TBL-40-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Question
+  to
+  answer</span> </p></td>
+</tr><tr id="TBL-40-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-2-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Change              </span></td><td class="td10" id="TBL-40-2-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Which
+  execution
+  choice
+  varies
+  between
+  the
+  runs?</span> </p></td>
+</tr><tr id="TBL-40-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-3-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Fixed inputs       </span></td><td class="td10" id="TBL-40-3-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Tokens,
+  history,
+  seed,
+  grammar,
+  model,
+  dtype,
+  hardware
+  and
+  flags?</span> </p></td>
+</tr><tr id="TBL-40-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-4-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Observable         </span></td><td class="td10" id="TBL-40-4-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Token
+  IDs,
+  logprobs,
+  embeddings,
+  an
+  aggregate,
+  distribution
+  or
+  syntax?</span> </p></td>
+</tr><tr id="TBL-40-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-5-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Preprocessing     </span></td><td class="td10" id="TBL-40-5-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Are
+  values
+  filtered,
+  cast,
+  forced
+  or
+  discarded
+  before
+  comparison?</span> </p></td>
+</tr><tr id="TBL-40-6-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-6-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Assertion           </span></td><td class="td10" id="TBL-40-6-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Direct
+  equality,
+  a
+  named
+  metric
+  and
+  tolerance,
+  or
+  a
+  statistical
+  rule?</span> </p></td>
+</tr><tr id="TBL-40-7-" style="vertical-align:baseline;"><td class="td01" id="TBL-40-7-1" style="text-align:left; white-space:nowrap;"><span class="ec-lmr-10">Uncovered claim  </span></td><td class="td10" id="TBL-40-7-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">What
+  plausible
+  failure
+  could
+  still
+  pass?</span> </p></td>
+</tr></table></div> </div>
+<p class="noindent">You can now follow a DeepInfer correctness claim from its configuration through the relevant
+library or state machine to the assertion that checks it, distinguishing fixed history from sampled
+output, stable random keys from a stable sampling path, and grammar validity from the
+                                                                                  
+                                                                                  
+probability or quality of the answer. Those boundaries tell you which test to run when changing
+the engine—and when a new test is needed.
+                                                                                  
+                                                                                  
+</p>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-09.html"><small>PREVIOUS</small>← Reconstruct state approximately</a><a class="next" href="chapter-11.html"><small>NEXT</small>From an engine to a service →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#equality-needs-a-fixed-computation-order">10.1 Equality needs a fixed computation order</a><a class="" href="#one-flag-reaches-several-libraries">10.2 One flag reaches several libraries</a><a class="" href="#golden-tokens-hold-the-trajectory-fixed">10.3 Golden tokens hold the trajectory fixed</a><a class="toc-sub" href="#what-the-override-changes">10.3.1 What the override changes</a><a class="toc-sub" href="#the-released-inventory">10.3.2 The released inventory</a><a class="toc-sub" href="#decode-versus-prefill-inspect-the-metric">10.3.3 Decode versus prefill: inspect the metric</a><a class="toc-sub" href="#two-other-baselines">10.3.4 Two other baselines</a><a class="" href="#repeatable-and-correctly-distributed-are-different-claims">10.4 Repeatable and correctly distributed are different claims</a><a class="toc-sub" href="#keys-belong-to-requests-positions-and-operations">10.4.1 Keys belong to requests, positions and operations</a><a class="toc-sub" href="#why-the-budget-matters-even-with-a-fixed-seed">10.4.2 Why the budget matters even with a fixed seed</a><a class="toc-sub" href="#test-the-probabilities-not-just-the-seed">10.4.3 Test the probabilities, not just the seed</a><a class="" href="#a-grammar-narrows-the-distribution">10.5 A grammar narrows the distribution</a><a class="toc-sub" href="#the-mask-belongs-to-a-tentative-history">10.5.1 The mask belongs to a tentative history</a><a class="toc-sub" href="#failure-ends-the-request">10.5.2 Failure ends the request</a><a class="toc-sub" href="#where-the-constraint-begins-and-what-the-tests-cover">10.5.3 Where the constraint begins, and what the tests cover</a><a class="" href="#experiments-to-try-next9">10.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>

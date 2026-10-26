@@ -1,0 +1,856 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spend verification work wisely · Inside DeepInfer</title><link rel="stylesheet" href="reader.css"><link rel="stylesheet" href="syntax.css"><script defer src="reader.js"></script></head>
+<body><a class="skip-link" href="#reading">Skip to text</a>
+<aside class="book-nav"><a class="brand" href="index.html"><span class="book-mark">ID</span><span>Inside<br>DeepInfer</span></a>
+<p class="subtitle">How an LLM Inference<br>Engine Works</p><p class="author">Jianxin Zhao</p>
+<details class="mobile-menu" open><summary>Contents</summary><nav aria-label="Book chapters"><div class="nav-label">START HERE</div><a class="book-link" href="index.html"><span>·</span>Preface</a><div class="nav-label">CHAPTERS</div><a class="book-link" href="chapter-01.html"><span>01</span>A generation loop</a><a class="book-link" href="chapter-02.html"><span>02</span>Where the time goes</a><a class="book-link" href="chapter-03.html"><span>03</span>The model shapes the engine</a><a class="book-link" href="chapter-04.html"><span>04</span>State needs an owner</a><a class="book-link" href="chapter-05.html"><span>05</span>Choose the next batch</a><a class="book-link" href="chapter-06.html"><span>06</span>Keep the host and device busy</a><a class="book-link" href="chapter-07.html"><span>07</span>Put experts on several devices</a><a class="book-link active" href="chapter-08.html" aria-current="page"><span>08</span>Spend verification work wisely</a><a class="book-link" href="chapter-09.html"><span>09</span>Reconstruct state approximately</a><a class="book-link" href="chapter-10.html"><span>10</span>Different correctness contracts</a><a class="book-link" href="chapter-11.html"><span>11</span>From an engine to a service</a><div class="nav-label">APPENDICES</div><a class="book-link" href="appendix-a.html"><span>A</span>Compression and indexing</a><a class="book-link" href="appendix-b.html"><span>B</span>Repository and execution map</a><a class="book-link" href="appendix-c.html"><span>C</span>Source edition and excerpts</a><div class="nav-label">REFERENCE</div><a class="book-link" href="glossary.html"><span>·</span>Terms and abbreviations</a><a class="book-link" href="references.html"><span>·</span>References</a><a class="book-link" href="notice.html"><span>·</span>Copyright and edition</a></nav>
+<div class="nav-bottom"><a href="book.pdf">Download the complete PDF ↗</a><a href="https://github.com/jzstark/inside-deepinfer-code">Experiments &amp; source ↗</a></div></details></aside>
+<div class="reader-layout"><main id="reading"><div class="page-meta"><span>INSIDE DEEPINFER</span><span>THE WEB EDITION</span></div>
+<article><p class="chapter-number">CHAPTER 08</p><h1 class="chapterHead" id="spend-verification-work-wisely"><a id="x1-1140008"></a>Spend verification work wisely</h1>
+<p class="noindent"><a id="ref-ch:verification"></a>
+</p><p class="indent">   Chapter 4 reserved room for <em>draft tokens</em>: cheap guesses that the model checks
+in its next decode step. Chapter 3 counted the six query positions that such a step
+evaluates, and chapter 6 corrected the host’s lengths once the device knew how many
+guesses survived. Two questions remain. What makes keeping a guess legitimate when we
+sample rather than always choose the most likely token? And how many guesses are
+worth the work of checking? The first is a question about probability, the second about
+cost. DeepInfer answers both in code that runs at every decode step. The README
+calls this feature <em>DSpark and confidence-scheduled verification</em>; the deployment Q&amp;A
+explains how DSpark uses predicted acceptance to allocate a variable verification budget
+<span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>, <a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p>
+
+<div class="tcolorbox questionbox" id="tcolobox-10">
+<div class="tcolorbox-title">
+<p class="noindent">The question</p></div>
+<div class="tcolorbox-content"><p class="noindent">A cheap predictor prefers B; the model we want to sample prefers A. Can we keep
+some of the predictor’s guesses and still obtain the model’s distribution? Then, if we
+can verify several guesses together, how many should we check? </p>
+</div>
+</div>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/17_verification.py
+</code></pre></div>
+<p class="indent">   The experiment enumerates three possible tokens with exact fractions. The <em>target </em>distribution
+is the one we want; the <em>draft </em>distribution belongs to the cheaper predictor. The standard column
+uses an exact correction rule. The penalised column changes that correction, using an exaggerated
+penalty so that the difference is visible:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Exact probabilities; illustrative alpha=9/10
+token  target  draft  standard  penalised  difference
+  A     1/2    1/3       1/2      19/39      -1/78
+  B     1/3    1/2       1/3        1/3          0
+  C     1/6    1/6       1/6       7/39       1/78
+Standard output equals target; penalised output obeys both bounds.
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/17_verification.txt">results/17_verification.txt</a></div></div>
+<p class="indent">   The standard rule recovers the target exactly. The modified rule moves
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>78</mn></mrow></math> of
+probability from A to C. Both columns sum to one, and both accept proposed tokens using the
+same test. The difference comes from what happens after a rejection. DeepInfer uses this second
+kind of correction, with a much smaller penalty. Understanding that choice comes before deciding
+how much verification work to schedule.
+</p><p class="indent">   Figure <a href="chapter-08.html#ref-fig:verification-path">8.1</a> locates the two decisions in DeepInfer’s loop. DFlash, DeepInfer’s draft model,
+proposes tokens; a pool retains them with their proposal probabilities and confidence estimates.
+The next verification step reads that proposal, but may check only a prefix. We first explain
+acceptance and correction, then the budget, and finally which round supplies each piece of
+information.
+</p>
+<figure class="figure"><a id="ref-fig:verification-path"></a>
+<p class="noindent" id="-the-proposal-and-verification-path-scheduling-chooses-how-much-of-the-stored-proposal-to-verify-round-labels-identify-the-datas-generation-not-when-the-host-receives-it"><a aria-label="Open figure at full size" class="figure-image" href="webbook20x.svg" rel="noopener" target="_blank"><img alt="Figure 8.1: The proposal and verification path. Scheduling chooses how much of the stored
+proposal to verify. Round labels identify the data’s generation, not when the host receives
+it." loading="lazy" src="webbook20x.svg"/></a>
+<a id="x1-114001r1"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 8.1: </span><span class="content">The proposal and verification path. Scheduling chooses how much of the stored
+proposal to verify. Round labels identify the data’s generation, not when the host receives
+it.
+</span></figcaption>
+
+</figure>
+<h3 class="sectionHead" id="accept-or-correct"><span class="titlemark">8.1   </span> <a id="x1-1150008.1"></a>Accept or correct</h3>
+<p class="noindent">Write <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> for a target
+probability and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+for the probability with which the draft actually proposes token
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi></mrow></math>. Draw
+from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi></mrow></math>,
+then accept the proposal with probability </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>a</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> min</mtext><mo> ⁡ </mo> <mrow><mo fence="true" form="prefix"> (</mo><mrow><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo> <mfrac><mrow><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></mfrac> </mrow><mo fence="true" form="postfix">)</mo></mrow><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   We only need this ratio for tokens that can be drawn:
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mn>0</mn></mrow></math>. The accepted
+probability mass at token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi></mrow></math>
+is therefore <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+Where the draft offers too much mass, the test removes the excess. Where it offers too little,
+acceptance alone cannot fill the gap.
+</p><p class="indent">   Set <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">]</mo></mrow><mrow><mo class="MathClass-bin" stretchy="false">+</mo></mrow></msub></mrow></math>, where
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>z</mi><mo class="MathClass-close" stretchy="false">]</mo></mrow><mrow><mo class="MathClass-bin" stretchy="false">+</mo></mrow></msub> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> max</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>z</mi><mo class="MathClass-punc" stretchy="false">,</mo><mn>0</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, and let
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="normal">Δ</mi> <mo class="MathClass-rel" stretchy="false">=</mo><msub><mrow> <mi class="MathClass-op">∑</mi><mo> ⁡</mo>
+</mrow><mrow><mi>x</mi></mrow></msub><mi>s</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. Since both
+distributions sum to one, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="normal">Δ</mi></mrow></math>
+is also the total rejection probability. On rejection, draw a replacement from
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi mathvariant="normal">Δ</mi></mrow></math>. The resulting
+probability of token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi></mrow></math>
+is </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>A</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mi mathvariant="normal">Δ</mi><mfrac><mrow><mi>s</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi mathvariant="normal">Δ</mi></mrow></mfrac> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   If <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="normal">Δ</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>0</mn></mrow></math>,
+every proposal is accepted and no replacement is needed. This is the probability argument behind
+the standard speculative sampling algorithms of Leviathan, Kalman and Matias and of Chen and
+colleagues <span class="cite">[<a href="references.html#Xspeculative-leviathan">56</a>, <a href="references.html#Xspeculative-chen">57</a>]</span>.
+</p><p class="indent">   In our example, the accepted masses of A, B and C are
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>6</mn></mrow></math>.
+Only B can be rejected: it is proposed with probability
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn></mrow></math> and accepted with
+probability <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3</mn></mrow></math>, leaving
+total rejection mass <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>6</mn></mrow></math>.
+Only A has a positive residual. Sending every rejection to A gives
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>6</mn></mrow></math>, the
+target distribution. Notice that the replacement need not be another draw from the target itself;
+it must fill precisely the missing mass.
+</p><p class="indent">   The lab enumerates every branch. Here <code>residual </code>has already been formed and <code>mass </code>is its
+sum:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.1.</b> Count accepted and replacement mass for every proposal.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="k">for</span> <span class="n">token</span><span class="p">,</span> <span class="n">q</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">draft</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">23</span><span>        <span class="k">if</span> <span class="ow">not</span> <span class="n">q</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">24</span><span>            <span class="k">continue</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">25</span><span>        <span class="n">accept</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">F</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span> <span class="n">target</span><span class="p">[</span><span class="n">token</span><span class="p">]</span> <span class="o">/</span> <span class="n">q</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">26</span><span>        <span class="n">output</span><span class="p">[</span><span class="n">token</span><span class="p">]</span> <span class="o">+=</span> <span class="n">q</span> <span class="o">*</span> <span class="n">accept</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span>        <span class="n">rejected</span> <span class="o">=</span> <span class="n">q</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">accept</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>        <span class="k">if</span> <span class="n">rejected</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>            <span class="k">assert</span> <span class="n">mass</span> <span class="o">&gt;</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>            <span class="k">for</span> <span class="n">replacement</span><span class="p">,</span> <span class="n">weight</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">residual</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">31</span><span>                <span class="n">output</span><span class="p">[</span><span class="n">replacement</span><span class="p">]</span> <span class="o">+=</span> <span class="n">rejected</span> <span class="o">*</span> <span class="n">weight</span> <span class="o">/</span> <span class="n">mass</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">32</span><span>    <span class="k">assert</span> <span class="nb">sum</span><span class="p">(</span><span class="n">output</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">33</span><span>    <span class="k">return</span> <span class="n">output</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/17_verification.py">labs/17_verification.py</a> · lines 22–33</div></div>
+<p class="indent">   The full lab checks equality on a grid of three-token distributions with probabilities in sixths.
+The grid includes identical distributions, disjoint supports and zero probabilities. These are exact
+calculations, not a histogram from a finite sample. The derivation explains why equality holds
+generally under the stated assumptions; the grid checks the implementation on those
+cases.
+</p><p class="indent">   For a draft prefix, apply the argument at each position conditional on the prefix
+already accepted. A target forward pass can compute the distributions for several
+positions together. If a draft is rejected, emit its replacement and discard later
+candidates: their target distributions were evaluated after a prefix we did not keep. If
+all checked drafts are accepted, emit one further target sample. Thus checking
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>k</mi></mrow></math> drafts can
+yield up to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>k</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>1</mn></mrow></math>
+tokens. Stopping conditions can shorten the published result. Exact one-position correction does
+not, by itself, prove every adaptive choice of which positions to check.
+</p>
+<h3 class="sectionHead" id="what-deepinfer-verifies"><span class="titlemark">8.2   </span> <a id="x1-1160008.2"></a>What DeepInfer verifies</h3>
+<p class="noindent">Chapter 6 followed the worker from forward to sampling. Inside that sampling stage,
+<code>Sampler._verification </code>maps flat logit rows to requests and local positions. It marks the first
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math> rows
+of each request for draft verification; the final row is the extra target sample if the
+prefix survives. The CUDA metadata helper expresses this as <code>step + 1 &lt; length
+</code><span class="cite">[<a href="references.html#Xdeepinfer-verifier">58</a>]</span>.
+                                                                                  
+                                                                                  
+</p><p class="indent">   The verifier needs the distribution that produced the previous draft, not a new prediction of
+that distribution. Its call to <code>process_sampling </code>receives stable pool storage and a row
+mapping:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.2.</b> Supply stored proposal probabilities and IDs to verification.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">439</span><span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">440</span><span>    <span class="n">logprobs</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">441</span><span>    <span class="n">token_index_cur</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">442</span><span>    <span class="n">candidate_token_ids</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">443</span><span>    <span class="n">accept_result_verify</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">444</span><span>    <span class="n">draft_selected_logprobs</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">445</span><span>    <span class="n">accept_probs</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">446</span><span><span class="p">)</span> <span class="o">=</span> <span class="n">process_sampling</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">447</span><span>    <span class="n">logits</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">448</span><span>    <span class="n">driver_inputs</span><span class="o">.</span><span class="n">kernel</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">449</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">force_topk</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">450</span><span>    <span class="n">row_to_req</span><span class="o">=</span><span class="n">row_to_req</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">451</span><span>    <span class="n">local_step</span><span class="o">=</span><span class="n">local_step</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">452</span><span>    <span class="n">is_verify</span><span class="o">=</span><span class="n">is_verify</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">453</span><span>    <span class="n">last_nextn_token_logprobs</span><span class="o">=</span><span class="n">mtp_info_pool</span><span class="o">.</span><span class="n">logprobs</span> <span class="k">if</span> <span class="n">speculative_inputs</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">454</span><span>    <span class="n">last_nextn_token_logprobs_index</span><span class="o">=</span><span class="n">mtp_info_pool</span><span class="o">.</span><span class="n">logprobs_index</span> <span class="k">if</span> <span class="n">speculative_inputs</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">455</span><span>    <span class="n">draft_token_ids_pool</span><span class="o">=</span><span class="n">mtp_info_pool</span><span class="o">.</span><span class="n">token_ids</span> <span class="k">if</span> <span class="n">mtp_info_pool</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">456</span><span>    <span class="n">mtp_info_read_rows</span><span class="o">=</span><span class="n">speculative_inputs</span><span class="o">.</span><span class="n">mtp_info_read_rows</span> <span class="k">if</span> <span class="n">speculative_inputs</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">457</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/sampler.py#L439-L457">deepinfer/model_executor/layers/sampler.py</a> · lines 439–457</div></div>
+<p class="indent">   The read-row mapping selects the stored proposal for each verification row. The helper
+<code>process_sampling</code>, in <span class="path"><code>layers/sampler_utils.py</code></span>, transforms the target logits and invokes the
+sampling kernel. In <code>force_topk </code>mode it first selects a smaller vocabulary and remaps the stored
+draft probabilities into the target’s selected vocabulary. The optional index pool preserves the
+connection to original token IDs. A missing draft token cannot be treated as if it had an arbitrary
+index in that smaller space <span class="cite">[<a href="references.html#Xdeepinfer-sampling-inputs">59</a>]</span>.
+</p><p class="indent">   Here and below, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math>
+means the target distribution <em>after </em>the applicable sampling transforms, including temperature
+and top-k/top-p filtering. It is not necessarily the raw model softmax. Likewise
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi></mrow></math> must
+be the distribution used to sample that draft. Structured-output masks are applied before this
+call, and golden overrides can later replace results. We analyse stochastic verification without
+such overrides; chapter 10 treats their separate contracts.
+</p>
+<h4 class="subsectionHead" id="the-acceptance-test-is-standard"><span class="titlemark">8.2.1   </span> <a id="x1-1170008.2.1"></a>The acceptance test is standard</h4>
+<p class="noindent">The CUDA kernel reads the target and stored draft log probabilities. After accounting for target
+filtering, it performs this test:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.3.</b> Accept using the target-to-draft probability ratio.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">391</span><span><span class="n">accept_lp</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">min</span><span class="p">(</span><span class="n">target_lp</span> <span class="o">-</span> <span class="n">draft_lp</span><span class="p">,</span> <span class="n">T</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">T</span><span class="o">.</span><span class="n">float</span><span class="p">))</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">392</span><span><span class="n">verify_seq</span> <span class="o">=</span> <span class="n">sample_positions</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="o">*</span> <span class="mi">3</span> <span class="o">+</span> <span class="mi">2</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">393</span><span><span class="n">T</span><span class="o">.</span><span class="n">rng_init</span><span class="p">(</span><span class="n">seed_val</span><span class="p">,</span> <span class="n">verify_seq</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">394</span><span><span class="n">accepted_s</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">rng_rand_float</span><span class="p">(</span><span class="mi">32</span><span class="p">,</span> <span class="s2">"uniform"</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">T</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">accept_lp</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py#L391-L394">deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py</a> · lines 391–394</div></div>
+<p class="indent">   Exponentiating the minimum gives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mtext class="qopname">min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn><mo class="MathClass-punc" stretchy="false">,</mo><mi>P</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mi>Q</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+The random stream uses the request’s seed and a value derived from the sampling position, rather
+than the decode step number. That choice matters when batching changes, but it is only one part
+of a deterministic execution contract.
+</p>
+<h4 class="subsectionHead" id="the-correction-deliberately-leaves-a-small-bias"><span class="titlemark">8.2.2   </span> <a id="x1-1180008.2.2"></a>The correction deliberately leaves a small bias</h4>
+<p class="noindent">Further down the same kernel, replacement weights are formed differently from the standard
+residual:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.4.</b> Subtract a slightly reduced draft probability.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">438</span><span>    <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">T</span><span class="o">.</span><span class="n">Parallel</span><span class="p">(</span><span class="n">SAMPLE_BD</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">439</span><span>        <span class="n">pf</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">Select</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">440</span><span>            <span class="n">i0</span> <span class="o">*</span> <span class="n">SAMPLE_BD</span> <span class="o">+</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">vocab_size</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">441</span><span>            <span class="n">T</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="n">pf</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">-</span> <span class="n">T</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="n">draft_lf</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">-</span> <span class="n">DRAFT_PROB_PENALTY</span><span class="p">),</span> <span class="mf">0.0</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">442</span><span>            <span class="mf">0.0</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">443</span><span>        <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">444</span><span><span class="k">if</span> <span class="n">do_sample</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">445</span><span>    <span class="n">accumulate</span><span class="p">(</span><span class="n">sample_cfg</span><span class="p">,</span> <span class="n">pf</span><span class="p">,</span> <span class="n">sample_acc_frag</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py#L438-L445">deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py</a> · lines 438–445</div></div>
+<p class="indent"> <code>DRAFT_PROB_PENALTY </code>is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>5</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>5</mn></mrow></msup></mrow></math>.
+Its comment says that the penalty prevents rejection sampling from finding nothing
+to sample (author’s translation of <span class="path"><code>tilelang_ops/common.py</code></span>, line 53). Writing
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>α</mi> <mo class="MathClass-rel" stretchy="false">=</mo><mtext class="qopname"> exp</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mo class="MathClass-bin" stretchy="false">−</mo><mn>5</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>1</mn><msup><mrow><mn>0</mn></mrow><mrow><mo class="MathClass-bin" stretchy="false">−</mo><mn>5</mn></mrow></msup><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>, these
+weights are </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>r</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <msub><mrow><mo class="MathClass-open" stretchy="false">[</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi mathvariant="italic">αQ</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">]</mo></mrow><mrow><mo class="MathClass-bin" stretchy="false">+</mo></mrow></msub><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Reducing the subtracted draft probability adds residual mass. It can give a token a
+positive replacement weight even when its standard residual is zero. In the lab,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>α</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>9</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>10</mn></mrow></math>: A’s residual
+becomes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>5</mn></mrow></math>, C’s
+becomes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>60</mn></mrow></math>,
+and B’s remains zero. Rejection still occurs with probability
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>6</mn></mrow></math>. Normalising those new
+weights gives A <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>12</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>13</mn></mrow></math> and C
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>13</mn></mrow></math> of the replacements,
+explaining the transfer of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>78</mn></mrow></math>.
+</p><p class="indent">   The source docstring gives a bound for this modified rule. It names the draft
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>p</mi></mrow></math> and the target
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>q</mi></mrow></math>; our notation reverses
+those roles, using <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi></mrow></math>.
+Its argument, rendered here in the book’s notation (author’s translation), starts by writing
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>𝜀</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>α</mi><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>r</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mi>s</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mspace class="qquad" width="2em"></mspace><mi>D</mi> <mo class="MathClass-rel" stretchy="false">=</mo><munder class="msub"><mrow><mo> ∑</mo>
+</mrow><mrow><mi>x</mi></mrow></munder><mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   The added mass satisfies <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>0</mn> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi mathvariant="italic">𝜀Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>,
+so <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>D</mi> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>𝜀</mi></mrow></math>.
+With the unchanged acceptance test, </p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<mi>A</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mfrac><mrow><mi mathvariant="normal">Δ</mi><mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi mathvariant="italic">Ds</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow>
+<mrow><mi mathvariant="normal">Δ</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>D</mi></mrow></mfrac> <mo class="MathClass-punc" stretchy="false">.</mo>
+</mrow></math></td></tr></table></div>
+<p class="indent">   For the upper bound, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi mathvariant="italic">𝜀P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+also holds: check separately <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≥</mo> <mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>
+and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">&lt;</mo> <mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. Hence
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>A</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>d</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi mathvariant="italic">𝜀P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. For the lower
+bound, use <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>s</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo><mi mathvariant="normal">Δ</mi></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>D</mi> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>𝜀</mi></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi mathvariant="normal">Δ</mi> <mo class="MathClass-rel" stretchy="false">≤</mo> <mn>1</mn></mrow></math> to
+obtain <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>A</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>D</mi><mi mathvariant="normal">Δ</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mo class="MathClass-open" stretchy="false">(</mo><mi mathvariant="normal">Δ</mi> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>D</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>𝜀</mi><mo class="MathClass-bin" stretchy="false">∕</mo><mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>𝜀</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>.
+The no-rejection case is immediate. Together these give the docstring’s per-token bound <span class="cite">[<a href="references.html#Xdeepinfer-sampling-penalty">60</a>]</span>:
+</p><div class="equation-scroll" tabindex="0"><table class="equation-star"><tr><td>
+<math class="equation" display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow>
+<menclose notation="box"><mrow> <mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-bin" stretchy="false">−</mo> <mfrac><mrow><mi>𝜀</mi></mrow>
+<mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>𝜀</mi></mrow></mfrac> <mo class="MathClass-rel" stretchy="false">≤</mo> <mi>A</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≤</mo> <mo class="MathClass-open" stretchy="false">(</mo><mn>1</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mi>𝜀</mi><mo class="MathClass-close" stretchy="false">)</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">.</mo> </mrow></menclose>
+</mrow></math></td></tr></table></div>
+<p class="indent">   Lab 17 checks both inequalities for four rational values of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>α</mi></mrow></math> on the
+same distribution grid:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Exact grid: 3136 bound checks (includes equal and disjoint supports).
+Configured penalty=5e-5: epsilon approximately 0.0000499988
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/17_verification.txt">results/17_verification.txt</a></div></div>
+<p class="indent">   The rational <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>9</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>10</mn></mrow></math>
+makes the difference visible and exactly computable. The configured exponential is not a rational number;
+its displayed <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>𝜀</mi></mrow></math>
+is a decimal approximation. These calculations verify the idealised rule. The general bound comes
+from the argument above, not from the number of examples tried.
+</p><p class="indent">   There is a further implementation boundary. <code>accumulate </code>converts the weights to
+fixed-point integers before summing them. If the accumulated replacement mass is zero,
+lines 506–518 of the kernel fall back to the first token attaining the maximum logit.
+Floating-point probability transforms, fixed-point accumulation and that fallback are not
+covered by the docstring’s ideal-arithmetic bound. For example, in exact arithmetic with
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>α</mi> <mo class="MathClass-rel" stretchy="false">&lt;</mo> <mn>1</mn></mrow></math>,
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi class="MathClass-op">∑</mi><mo> ⁡</mo>
+</mrow><mrow><mi>x</mi></mrow></msub><mi>r</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">≥</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>α</mi> <mo class="MathClass-rel" stretchy="false">&gt;</mo> <mn>0</mn></mrow></math>; the
+zero-mass fallback is not a branch that our rational model should invent. We have inspected these
+implementation choices, not established a combined error bound for the GPU kernel
+<span class="cite">[<a href="references.html#Xdeepinfer-verifier">58</a>, <a href="references.html#Xdeepinfer-fixed-sampling">61</a>]</span>.
+</p><p class="indent">   This is the chapter’s comparison boundary: DeepInfer retains the standard acceptance rule
+                                                                                  
+                                                                                  
+and modifies the rejection residual. The inspected code and its comment support that difference.
+They do not support a claim that the released sampler preserves the target distribution
+exactly.
+</p>
+<h4 class="subsectionHead" id="only-a-surviving-prefix-is-published"><span class="titlemark">8.2.3   </span> <a id="x1-1190008.2.3"></a>Only a surviving prefix is published</h4>
+<p class="noindent">Some sampled candidates follow a rejected draft and cannot be published. The helper
+<code>get_accept_result </code>finds which remain usable. After identifying the request and its first row, the
+kernel scans earlier positions:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.5.</b> A candidate is usable only while all earlier verification rows survive.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">261</span><span><span class="n">req</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">row_to_req</span><span class="p">[</span><span class="n">row</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">262</span><span><span class="n">start</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">ftp</span><span class="p">[</span><span class="n">req</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">263</span><span><span class="n">alive</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">bool</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">264</span><span><span class="n">prev</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">start</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">265</span><span><span class="k">while</span> <span class="n">alive</span> <span class="ow">and</span> <span class="n">prev</span> <span class="o">&lt;</span> <span class="n">row</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span>    <span class="n">prev_accept</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">bool</span><span class="p">,</span> <span class="n">raw_accept</span><span class="p">[</span><span class="n">prev</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">267</span><span>    <span class="k">if</span> <span class="n">has_golden</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">268</span><span>        <span class="n">prev_golden</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">golden</span><span class="p">[</span><span class="n">prev</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">269</span><span>        <span class="k">if</span> <span class="n">prev_golden</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">270</span><span>            <span class="n">prev_draft_row</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">read_rows</span><span class="p">[</span><span class="n">prev</span><span class="p">])</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">271</span><span>            <span class="n">prev_accept</span> <span class="o">=</span> <span class="n">prev_golden</span> <span class="o">==</span> <span class="n">draft_token_ids_pool</span><span class="p">[</span><span class="n">prev_draft_row</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">272</span><span>    <span class="n">alive</span> <span class="o">=</span> <span class="n">is_verify</span><span class="p">[</span><span class="n">prev</span><span class="p">]</span> <span class="ow">and</span> <span class="n">prev_accept</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">273</span><span>    <span class="n">prev</span> <span class="o">+=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">274</span><span><span class="n">token_ids_out</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="o">=</span> <span class="n">token</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">275</span><span><span class="n">accept_out</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="o">=</span> <span class="n">alive</span> <span class="ow">and</span> <span class="n">is_verify</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="ow">and</span> <span class="n">accept</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">276</span><span><span class="n">is_final_out</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="o">=</span> <span class="n">alive</span> <span class="ow">and</span> <span class="p">(</span><span class="ow">not</span> <span class="n">is_verify</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">accept</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/sampler.py#L261-L276">deepinfer/model_executor/layers/tilelang_ops/cuda/sampler.py</a> · lines 261–276</div></div>
+<p class="indent">   Ignoring the explicit golden overrides, <code>alive </code>remains true only through an accepted draft
+prefix. The first rejection is a final row; later rows are neither accepted nor final. If no draft
+rejects, the extra, non-verification row is final. <code>finalize_verification </code>collects that final token
+and the accepted draft IDs. Suppose four positions checked three drafts and the second draft
+failed. The first draft and the second row’s replacement survive; the third draft and
+extra target sample do not. Chapter 4’s processed-token count is later corrected to this
+actual progress, even though the forward already evaluated and wrote state for more
+positions.
+</p>
+<h3 class="sectionHead" id="how-many-positions-are-worth-the-work"><span class="titlemark">8.3   </span> <a id="x1-1200008.3"></a>How many positions are worth the work?</h3>
+<div class="code-card console"><div class="code-tools"><span>BASH</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>python3<span class="w"> </span>labs/18_verification_budget.py
+</code></pre></div>
+<p class="indent">   Lab 18 translates DeepInfer’s CPU budget search and checks it against exhaustive prefix choices on a
+small input. There are two requests, each with three available drafts. Their older cumulative confidence
+values are <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0.90</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.72</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.36</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> and
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0.80</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.40</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.10</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>. The first request’s
+raw estimates were <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><mn>0.90</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.80</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.50</mn><mo class="MathClass-close" stretchy="false">)</mo></mrow></math>:
+reaching draft 3 requires accepting drafts 1 and 2, so the estimated chance of keeping the prefix is their
+product, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>0.36</mn></mrow></math>.
+These are predictions, not the acceptance probabilities computed by verification.
+</p><p class="indent">   The lab forms the prefix products with <code>itertools.accumulate</code>, using multiplication:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.6.</b> Turn conditional confidence estimates into prefix estimates.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">20</span><span><span class="k">def</span> <span class="nf">cumulative</span><span class="p">(</span><span class="n">raw</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">21</span><span>    <span class="k">assert</span> <span class="nb">all</span><span class="p">(</span><span class="mi">0</span> <span class="o">&lt;=</span> <span class="n">r</span> <span class="o">&lt;=</span> <span class="mi">1</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">raw</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">row</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">22</span><span>    <span class="k">return</span> <span class="p">[</span><span class="nb">list</span><span class="p">(</span><span class="n">accumulate</span><span class="p">(</span><span class="n">row</span><span class="p">,</span> <span class="n">mul</span><span class="p">))</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">raw</span><span class="p">]</span></span></span>
+</code></pre><div class="code-source">Book lab · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/labs/18_verification_budget.py">labs/18_verification_budget.py</a> · lines 20–22</div></div>
+<p class="indent">   The script prints every candidate under four assigned cost curves. Here is the staircase
+case:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>stairs: synthetic time units; sampler=2, slope=0
+  positions graph expected time  output/time
+          2     2     2.00   10       0.2000
+          3     4     2.90   12       0.2417
+          4     4     3.70   12       0.3083
+          5     6     4.42   14       0.3157
+          6     6     4.82   14       0.3443
+          7     8     5.18   30       0.1727
+          8     8     5.28   30       0.1760
+  chosen total=6, q(N-1)=[2, 4]
+  allocation using N-2 instead: [3, 3]
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/18_verification_budget.txt">results/18_verification_budget.txt</a></div></div>
+<p class="indent">   There is one main input position per request before adding any drafts. Start with
+two expected output tokens and two positions. Sorting all cumulative values gives
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>0.90</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.80</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.72</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.40</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.36</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>0.10</mn></mrow></math>. Taking the first four
+extras raises the score to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>2</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.90</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.80</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.72</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.40</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>4.82</mn></mrow></math>,
+with six positions of work. The assigned cost is 14, so the score is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>4.82</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>14</mn> <mo class="MathClass-rel" stretchy="false">≈</mo> <mn>0.3443</mn></mrow></math>. A
+seventh position crosses a graph boundary and costs 30; its extra expected output cannot pay for
+                                                                                  
+                                                                                  
+that jump. Figure <a href="chapter-08.html#ref-fig:verification-budget">8.2</a> shows the three assigned cost curves.
+</p>
+<figure class="figure"><a id="ref-fig:verification-budget"></a>
+<p class="noindent" id="-lab-s-assigned-costs-positions-within-one-graph-bucket-share-a-cost-crossing-a-boundary-can-change-which-budget-wins-the-choices-maximise-estimated-output-per-time-using-the-same-older-confidence-values"><a aria-label="Open figure at full size" class="figure-image" href="webbook21x.svg" rel="noopener" target="_blank"><img alt="Figure 8.2: Lab 18’s assigned costs. Positions within one graph bucket share a cost; crossing
+a boundary can change which budget wins. The choices maximise estimated output per
+time, using the same older confidence values." loading="lazy" src="webbook21x.svg"/></a>
+<a id="x1-120001r2"></a>
+</p>
+<figcaption class="caption"><span class="id">Figure 8.2: </span><span class="content">Lab 18’s assigned costs. Positions within one graph bucket share a cost; crossing
+a boundary can change which budget wins. The choices maximise estimated output per
+time, using the same older confidence values.
+</span></figcaption>
+
+</figure>
+<p class="indent">   Changing only the cost curve changes the winning total: flat costs choose all eight
+positions, the staircase chooses six, and the steep curve chooses four. In the fourth
+case, moving the steep curve’s second graph size from four to five makes five positions
+best: the fifth now fits in the cheaper bucket. Within a bucket, another position with
+positive expected value improves the score at no extra <em>modelled </em>time. This is chapter 2’s
+distinction between request count and evaluated positions expressed through graph
+sizes.
+</p><p class="indent">   The script also changes the confidence history used for allocation.
+In the staircase output, the total is six but the lengths are
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>; allocating with the
+older values would give <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>.
+The total and its distribution are separate decisions. We will trace their rounds after inspecting
+the search.
+</p>
+<h4 class="subsectionHead" id="a-search-over-totals-then-a-second-allocation"><span class="titlemark">8.3.1   </span> <a id="x1-1210008.3.1"></a>A search over totals, then a second allocation</h4>
+<p class="noindent">The decode scheduler calls <code>MTPVarlen::schedule </code>after choosing requests. It sums the returned
+query lengths into <code>num_batched_tokens</code>. Here <code>bsz </code>counts <em>positions</em>, not requests. The class
+builds two sorted queues of cumulative confidence values, one to choose this total and one to
+divide it among requests. Its comparator sorts by descending value, breaking ties by request index
+(lines 210–214) <span class="cite">[<a href="references.html#Xdeepinfer-mtp-budget">62</a>]</span>.
+</p><p class="indent">   For estimates in <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>0</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>1</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>,
+cumulative values along a request never increase. A later position cannot strictly outrank an
+earlier one. Equal values need not retain position order in the C++ sort: the result stores a <em>count</em>
+per request and uses that many positions from the beginning. Thus counts still specify prefixes.
+This is why cumulative estimates, rather than unmultiplied per-position confidence, fit this
+allocation rule.
+</p><p class="indent">   For each total, the search scores the smallest graph large enough:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.7.</b> Round positions to a graph bucket and score expected output per time.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">234</span><span><span class="kt">int</span><span class="w"> </span><span class="n">cur_bsz_idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">235</span><span><span class="k">auto</span><span class="w"> </span><span class="n">update_best</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="o">&amp;</span><span class="p">]()</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">236</span><span><span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">cur_bsz_idx</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_bsz_selections</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">cur_bsz</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">_decode_perf_curve</span><span class="p">[</span><span class="n">cur_bsz_idx</span><span class="p">].</span><span class="n">first</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">237</span><span><span class="w">        </span><span class="o">++</span><span class="n">cur_bsz_idx</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">238</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">239</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cur_bsz_idx</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">num_bsz_selections</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">240</span><span><span class="w">        </span><span class="k">return</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">241</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">242</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="p">[</span><span class="n">graph_size</span><span class="p">,</span><span class="w"> </span><span class="n">baseline_ms</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_decode_perf_curve</span><span class="p">[</span><span class="n">cur_bsz_idx</span><span class="p">];</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">243</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">time_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">baseline_ms</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">slope_ms</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">graph_size</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">sampler_ms</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">244</span><span><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">double</span><span class="w"> </span><span class="n">cur_throughput</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur_expected</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">time_ms</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">245</span><span><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cur_throughput</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">best_throughput</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">246</span><span><span class="w">        </span><span class="n">best_throughput</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur_throughput</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">247</span><span><span class="w">        </span><span class="n">best_bsz</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cur_bsz</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">248</span><span><span class="w">    </span><span class="p">}</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">249</span><span><span class="p">};</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L234-L249">csrc/engine/mtp_varlen.hpp</a> · lines 234–249</div></div>
+<p class="indent">   There are three terms in <code>time_ms</code>: a startup forward measurement for the graph, an online
+slope times the graph size, and an estimated sampler time. Before this excerpt the slope is
+clamped to zero or above. Candidates beyond the largest available graph are ignored. The strict <code>&gt;</code>
+keeps the earlier, smaller total when two scores tie.
+</p><p class="indent">   The loop adds one candidate’s estimated output and one position at a time:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.8.</b> Consider the main positions first, then every larger candidate total.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">252</span><span><span class="n">update_best</span><span class="p">();</span><span class="w"> </span><span class="c1">// All the golden tokens</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">253</span><span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">254</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">&amp;</span><span class="n">acc</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">acc_queue_for_bsz</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">255</span><span><span class="w">    </span><span class="n">cur_expected</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">acc</span><span class="p">.</span><span class="n">first</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">256</span><span><span class="w">    </span><span class="n">cur_bsz</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">257</span><span><span class="w">    </span><span class="n">update_best</span><span class="p">();</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">258</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L252-L258">csrc/engine/mtp_varlen.hpp</a> · lines 252–258</div></div>
+<p class="indent">   The final allocation deliberately uses the other queue:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.9.</b> Keep the chosen total while distributing its extra positions.</div><div class="code-tools"><span>CPP</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">263</span><span><span class="n">seqlens_q</span><span class="p">.</span><span class="n">assign</span><span class="p">(</span><span class="n">num_seqs</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">264</span><span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">best_bsz</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">num_seqs</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">265</span><span><span class="w">    </span><span class="n">seqlens_q</span><span class="p">[</span><span class="n">acc_queue_for_seqs_q</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">second</span><span class="p">]</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">266</span><span><span class="p">}</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/csrc/engine/mtp_varlen.hpp#L263-L266">csrc/engine/mtp_varlen.hpp</a> · lines 263–266</div></div>
+<p class="indent">   Lab 18 preserves these decisions, including the tie rule, graph limit and non-negative slope. Its
+independent check enumerates every possible pair of prefix lengths under the older confidence
+values and confirms the winning total. It also tests nonzero slopes, absent drafts and equal scores.
+Fractions remove rounding ambiguity in the teaching input; the production search uses
+floating-point values. The check does not say that the newer allocation maximises
+the older score, or that either predicts measured throughput exactly. EOS, confidence
+errors and changes in workload can all separate the estimate from useful published
+output.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="the-engine-supplies-the-time-model"><span class="titlemark">8.3.2   </span> <a id="x1-1220008.3.2"></a>The engine supplies the time model</h4>
+<p class="noindent"><code>ModelRunner.profile_decode_perf </code>measures the startup curve, if a cached curve is unavailable.
+It replays each captured graph once to warm up and five times with CUDA timing events. Expert
+routing is forced random during profiling. With <code>NUM_TRIM=1</code>, the sorted measurements lose one
+value at each end:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.10.</b> Average the middle three measurements, then average across EP ranks.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">617</span><span><span class="n">times_ms</span><span class="o">.</span><span class="n">sort</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">618</span><span><span class="n">trimmed</span> <span class="o">=</span> <span class="n">times_ms</span><span class="p">[</span><span class="n">NUM_TRIM</span> <span class="p">:</span> <span class="n">NUM_MEASURE</span> <span class="o">-</span> <span class="n">NUM_TRIM</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">619</span><span><span class="n">avg_time_ms</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">trimmed</span><span class="p">)</span> <span class="o">/</span> <span class="nb">len</span><span class="p">(</span><span class="n">trimmed</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">620</span><span><span class="n">sum_time</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">full</span><span class="p">((</span><span class="mi">1</span><span class="p">,),</span> <span class="n">avg_time_ms</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="s2">"cuda"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">621</span><span><span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">sum_time</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">ReduceOp</span><span class="o">.</span><span class="n">SUM</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">group</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">622</span><span><span class="n">avg_time_ms</span> <span class="o">=</span> <span class="n">sum_time</span><span class="o">.</span><span class="n">item</span><span class="p">()</span> <span class="o">/</span> <span class="n">group</span><span class="o">.</span><span class="n">size</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">623</span><span><span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">avg_time_ms</span><span class="p">))</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/worker/model_runner.py#L617-L623">deepinfer/worker/model_runner.py</a> · lines 617–623</div></div>
+<p class="indent">   For five assigned times <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>9</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>10</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>11</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>12</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>40</mn></mrow></math>,
+this rule gives 11. It does not average the best four, nor does it describe the maximum rank time.
+The cached startup curve is a baseline; current context lengths and routing can change forward
+cost <span class="cite">[<a href="references.html#Xdeepinfer-mtp-profile">63</a>]</span>.
+</p><p class="indent">   Chapter 6 already located the device events and the wait before post-processing. The feedback
+connection is now visible in <code>LLMEngine.post_process</code>:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.11.</b> Feed completed device timings back into the budget estimator.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">995</span><span><span class="k">if</span> <span class="n">step_state</span><span class="o">.</span><span class="n">forward_events</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">step_state</span><span class="o">.</span><span class="n">sample_events</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">996</span><span>    <span class="c1"># Worker has synchronized this step's sample_end_evt before calling post_process.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">997</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">update_mtp_runtime</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">998</span><span>        <span class="nb">len</span><span class="p">(</span><span class="n">seq_metadata_list</span><span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">999</span><span>        <span class="n">step_state</span><span class="o">.</span><span class="n">graph_size</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1000</span><span>        <span class="n">step_state</span><span class="o">.</span><span class="n">forward_events</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">elapsed_time</span><span class="p">(</span><span class="n">step_state</span><span class="o">.</span><span class="n">forward_events</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1001</span><span>        <span class="n">step_state</span><span class="o">.</span><span class="n">sample_events</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">elapsed_time</span><span class="p">(</span><span class="n">step_state</span><span class="o">.</span><span class="n">sample_events</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">1002</span><span>    <span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/engine/llm_engine.py#L995-L1002">deepinfer/engine/llm_engine.py</a> · lines 995–1002</div></div>
+<p class="indent"> <code>update_runtime </code>compares forward time with the baseline at graph size
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>g</mi></mrow></math>, storing the
+normalised residual <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">(</mo><msub><mrow><mi>T</mi></mrow><mrow><mstyle mathvariant="normal"><mi>forward</mi></mstyle></mrow></msub> <mo class="MathClass-bin" stretchy="false">−</mo> <msub><mrow><mi>T</mi></mrow><mrow><mstyle mathvariant="normal"><mi>startup</mi></mstyle></mrow></msub><mo class="MathClass-open" stretchy="false">(</mo><mi>g</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-bin" stretchy="false">∕</mo><mi>g</mi></mrow></math>.
+<code>ForwardRuntimeEstimator </code>keeps 5,000 steps. It takes a median within each graph size having at
+least ten samples, then a median across those graph-size medians. A frequently used graph does
+not gain extra votes in that second median. This is a robust residual-slope estimate, not a
+least-squares fit. If no graph meets the threshold, the slope is zero. The schedule clamps a
+negative estimate to zero, making the startup curve the lower bound on estimated forward cost
+<span class="cite">[<a href="references.html#Xdeepinfer-mtp-budget">62</a>]</span>.
+</p><p class="indent">   Sampler time has no startup curve. Its estimator keeps nine observations and requires
+five before returning a median. The search prefers history for the same request count,
+then a global sampler history, then zero. For example, a forward baseline of 10 at
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>g</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>6</mn></mrow></math>, an estimated slope
+of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>0.5</mn></mrow></math>, and a sampler
+estimate of 2 give <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>10</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>0.5</mn> <mo class="MathClass-bin" stretchy="false">×</mo> <mn>6</mn> <mo class="MathClass-bin" stretchy="false">+</mo> <mn>2</mn> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>15</mn></mrow></math>
+in consistent time units. The lab assigns these inputs; it does not reproduce startup profiling or
+measure a device.
+</p>
+<h4 class="subsectionHead" id="fixed-length-is-the-default"><span class="titlemark">8.3.3   </span> <a id="x1-1230008.3.3"></a>Fixed length is the default</h4>
+<p class="noindent">Variable-length verification is off by default: <code>DEEPINFER_ENABLE_MTP_VARLEN </code>is false. The draft
+limit is five, set by <code>DEEPINFER_USE_NEXTN_DECODE</code>. The actual fixed-length branch in
+<code>MTPVarlen::schedule </code>is an empty performance curve: each request receives one plus its available
+draft count (lines 152–157). <code>WorkerBase.warm_up_model </code>obtains a curve only under the graph
+and variable-length conditions in <span class="path"><code>worker/base.py</code></span>, lines 275–281. Turning on the flag alone does
+not guarantee a usable curve <span class="cite">[<a href="references.html#Xdeepinfer-environ">30</a>, <a href="references.html#Xdeepinfer-mtp-profile">63</a>]</span>.
+</p><p class="indent">   With five available drafts, fixed verification evaluates six positions per request. Chapters 3 and
+6 have already traced those positions through decode SWA writes and lagging metadata. Variable
+                                                                                  
+                                                                                  
+verification changes which prefix is evaluated; it still needs the same attention and lifetime
+rules.
+</p>
+<h3 class="sectionHead" id="which-round-supplies-the-confidence"><span class="titlemark">8.4   </span> <a id="x1-1240008.4"></a>Which round supplies the confidence?</h3>
+<p class="noindent">Call the current verification step <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi></mrow></math>.
+Its draft was produced in round <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>.
+That draft has three different kinds of associated information: its token IDs, the log probabilities
+of the distribution used to sample it, and a confidence head’s estimates of acceptance. The first
+two drive sampling correctness. The third predicts where verification work will be useful. Return
+to Figure <a href="chapter-08.html#ref-fig:verification-path">8.1</a>: we can now follow the writes and reads behind its pool boundary, then distinguish
+the histories used by scheduling.
+</p>
+<h4 class="subsectionHead" id="produce-once-store-the-distribution-verify-later"><span class="titlemark">8.4.1   </span> <a id="x1-1250008.4.1"></a>Produce once, store the distribution, verify later</h4>
+<p class="noindent">DeepInfer’s draft model is the <code>DFlash </code>module in <span class="path"><code>model_executor/models/mtp/</code></span>, named after
+multi-token prediction (MTP); <code>nextn </code>is its configured draft count. DFlash starts from
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mstyle mathvariant="normal"><mi>golden</mi></mstyle><mo class="MathClass-punc" stretchy="false">,</mo><mstyle mathvariant="normal"><mi>noise</mi></mstyle><mo class="MathClass-punc" stretchy="false">,</mo><mo>…</mo><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>, where
+the first token is the just-selected target output. Its draft layers process these positions together,
+and <code>sample_drafts </code>computes base logits for them. It then samples position by position. An
+optional Markov correction changes the logits using the previous draft token (lines 308–314). This
+permits a parallel base computation while retaining that dependency during sampling
+<span class="cite">[<a href="references.html#Xdeepinfer-dflash">64</a>]</span>.
+</p><p class="indent">   The confidence head runs before sampling the token at that position. The sampling call also
+writes the log probabilities actually used:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.12.</b> Predict confidence and sample the draft with the request’s sampling parameters.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">315</span><span><span class="k">if</span> <span class="n">confidence_rates</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">316</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">confidence_head</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">317</span><span>        <span class="n">hidden_states_before_norm</span><span class="p">[</span><span class="n">step_i</span> <span class="p">::</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_MTP_value</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">318</span><span>        <span class="n">w1</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">319</span><span>        <span class="n">out</span><span class="o">=</span><span class="n">confidence_rates</span><span class="p">[:,</span> <span class="n">step_i</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">320</span><span>        <span class="n">step_i</span><span class="o">=</span><span class="n">step_i</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">321</span><span>    <span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">322</span><span><span class="n">_</span><span class="p">,</span> <span class="n">token_index_next</span><span class="p">,</span> <span class="n">draft_token_ids</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">process_sampling</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">323</span><span>    <span class="n">logits</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">324</span><span>    <span class="n">SamplingKernelInputs</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">325</span><span>        <span class="n">sampling_input</span><span class="o">.</span><span class="n">kernel_inputs</span><span class="o">.</span><span class="n">logits</span><span class="p">,</span> <span class="n">sampling_input</span><span class="o">.</span><span class="n">kernel_inputs</span><span class="o">.</span><span class="n">seq_seeds</span><span class="p">,</span> <span class="n">sample_positions_table</span><span class="p">[</span><span class="n">step_i</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">326</span><span>    <span class="p">),</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">327</span><span>    <span class="bp">self</span><span class="o">.</span><span class="n">force_topk</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">328</span><span>    <span class="n">logprobs_out</span><span class="o">=</span><span class="n">next_n_token_logprobs</span><span class="p">[:,</span> <span class="n">step_i</span><span class="p">],</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">329</span><span>    <span class="n">tag</span><span class="o">=</span><span class="s2">"mtp"</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">330</span><span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L315-L330">deepinfer/model_executor/models/mtp/dflash.py</a> · lines 315–330</div></div>
+<p class="indent">   The same request sampling parameters feed this call, but the logits come from the draft
+model. Equal parameters do not mean equal distributions. With <code>force_topk</code>, sampled indices are
+mapped back to token IDs and the index mapping is retained. After the position loop, all
+proposal data is stored:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.13.</b> Keep the proposal and its distribution in the assigned pool slots.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">339</span><span><span class="bp">self</span><span class="o">.</span><span class="n">mtp_info_pool</span><span class="o">.</span><span class="n">store</span><span class="p">(</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">340</span><span>    <span class="n">sampling_input</span><span class="o">.</span><span class="n">mtp_info_write_slots</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">341</span><span>    <span class="n">prediction</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">342</span><span>    <span class="n">next_n_token_logprobs</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">343</span><span>    <span class="n">next_n_token_logprobs_index</span><span class="p">,</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">344</span><span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">345</span><span><span class="k">return</span> <span class="n">prediction</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/models/mtp/dflash.py#L339-L345">deepinfer/model_executor/models/mtp/dflash.py</a> · lines 339–345</div></div>
+<p class="indent"> <code>MTPInfoPool </code>owns GPU arrays for IDs, log probabilities, optional confidence and optional
+top-k indices. Each slot has <code>nextn </code>rows; slot zero is reserved for padding. The scheduler assigns
+slots, and verification’s read-row mapping selects their contents. This closes the path back to the
+pool inputs printed earlier. Recomputing a draft distribution later with different filtering would
+not justify the probability argument <span class="cite">[<a href="references.html#Xdeepinfer-mtp-pool">65</a>]</span>.
+</p><p class="indent">   Host post-processing separately updates the confidence history in <code>process_MTPInfo</code>. It moves
+<code>accept_rates </code>into <code>prev_accept_rates</code>, multiplies the new raw confidence values along each
+prefix, and stores those products as the new <code>accept_rates </code>(<span class="path"><code>scheduler.hpp</code></span>, lines 1239–1250).
+Despite their names, these fields contain confidence-head estimates. They are not the verifier’s
+measured <code>accept_probs </code>values.
+                                                                                  
+                                                                                  
+</p>
+<h4 class="subsectionHead" id="choose-a-total-with-older-information"><span class="titlemark">8.4.2   </span> <a id="x1-1260008.4.2"></a>Choose a total with older information</h4>
+<p class="noindent">Two counters locate the host’s history: <code>schedule_cnt </code>advances on scheduling; <code>process_cnt</code>
+advances when processing MTP information. The budget selector checks that the host is either
+caught up or one step behind. Its comment specifies this division of rounds (author’s translation
+of <span class="path"><code>mtp_varlen.hpp</code></span>, lines 159–167): </p>
+<div class="center">
+
+<div class="table-scroll" tabindex="0"><table class="tabular" id="TBL-22"><colgroup id="TBL-22-1g"><col id="TBL-22-1"/><col id="TBL-22-2"/><col id="TBL-22-3"/></colgroup><tr id="TBL-22-1-" style="vertical-align:baseline;"><td class="td01" id="TBL-22-1-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Decision</span> </p></td><td class="td11" id="TBL-22-1-2" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Host
+  caught
+  up</span> </p></td><td class="td10" id="TBL-22-1-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">Host
+  one
+  step
+  behind
+  (ZOS)</span> </p></td>
+</tr><tr id="TBL-22-2-" style="vertical-align:baseline;"><td class="td01" id="TBL-22-2-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Counter
+relation</span> </p></td><td class="td11" id="TBL-22-2-2" style="text-align:left;"> <p class="noindent"><code>schedule_cnt</code><br class="newline"/><code>=
+ process_cnt</code> </p></td><td class="td10" id="TBL-22-2-3" style="text-align:left;"> <p class="noindent"><code>schedule_cnt</code><br class="newline"/><code>=
+ process_cnt
+ +
+ 1</code> </p></td>
+</tr><tr id="TBL-22-3-" style="vertical-align:baseline;"><td class="td01" id="TBL-22-3-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Total
+budget</span> </p></td><td class="td11" id="TBL-22-3-2" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>2</mn></mrow></math><span class="ec-lmr-10">:
+  </span><code>prev_accept_rates</code> </p></td><td class="td10" id="TBL-22-3-3" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>2</mn></mrow></math><span class="ec-lmr-10">:
+  </span><code>accept_rates</code> </p></td>
+</tr><tr id="TBL-22-4-" style="vertical-align:baseline;"><td class="td01" id="TBL-22-4-1" style="text-align:left;"><p class="noindent"><span class="ec-lmr-10">Per-request
+lengths</span> </p></td><td class="td11" id="TBL-22-4-2" style="text-align:left;"> <p class="noindent"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math><span class="ec-lmr-10">:
+  </span><code>accept_rates</code> </p></td><td class="td10" id="TBL-22-4-3" style="text-align:left;"> <p class="noindent"><span class="ec-lmr-10">CPU
+  provisionally
+  uses</span>
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>2</mn></mrow></math><span class="ec-lmr-10">;
+  GPU
+  reallocates
+  using</span>
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo><mn>1</mn></mrow></math></p></td>
+</tr><tr id="TBL-22-5-" style="vertical-align:baseline;"><td class="td01" id="TBL-22-5-1" style="text-align:left;"></td></tr></table></div> </div>
+<p class="indent">   In code, <code>post_process_paired </code>is the equality of the two counters. Line 204 chooses
+<code>prev_accept_rates </code>when they match and <code>accept_rates </code>when they do not, supplying
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>2</mn></mrow></math> to the
+budget queue in either case. Line 207 always supplies the current host <code>accept_rates </code>to the
+allocation queue. That second queue is current enough without ZOS, but one round stale with it
+<span class="cite">[<a href="references.html#Xdeepinfer-mtp-budget">62</a>, <a href="references.html#Xdeepinfer-sequence">6</a>]</span>.
+</p><p class="indent">   The comment begins with a stronger constraint than a timing observation: confidence at later
+positions must not affect whether an earlier draft token is verified (author’s translation of line
+159). Later confidence may depend on earlier sampled tokens, so using it to decide whether to
+keep those tokens can introduce selection bias. The code documents this concern and its choice
+of rounds; it does not provide a complete proof for the adaptive policy. Keeping the
+total-budget rule consistent with and without ZOS is a plausible additional reason for using
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>2</mn></mrow></math>, but
+that is an inference, not a stated explanation that replaces the constraint.
+</p><p class="indent">   The inspected construction appears to respect that constraint. We
+state the argument as an inference, not a proof. Take draft position
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math> of one
+request. First, the DFlash loop runs the confidence head before sampling the token at that position,
+                                                                                  
+                                                                                  
+so <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>c</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+can depend on earlier draft tokens through the Markov input but not on
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+itself. Second, cumulative values never increase along a request, and the allocation
+records counts, so the request’s later positions cannot take a slot ahead of
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>i</mi></mrow></math>. Third,
+competing positions from other requests depend on their own drafts, not on this request’s
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>. Finally, the total comes
+from round <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>2</mn></mrow></math>, before these
+drafts existed. Whether <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+is verified may therefore depend on the prefix before it, but not on
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math> or
+later tokens of the same request.
+</p><p class="indent">   Given an accepted prefix, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>
+is then a draw from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>Q</mi></mrow></math>
+that the test either accepts or replaces. If verification stops before
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mrow><mi>x</mi></mrow><mrow><mi>i</mi></mrow></msub></mrow></math>, the
+final row is a target sample instead. In ideal arithmetic with the standard residual, both routes
+give the target’s conditional distribution at that position. A complete argument for the engine
+would also need to cover structured-output masks, golden overrides, the penalised residual and
+numerical effects.
+</p>
+<h4 class="subsectionHead" id="reallocate-on-the-device-without-changing-the-total"><span class="titlemark">8.4.3   </span> <a id="x1-1270008.4.3"></a>Reallocate on the device without changing the total</h4>
+<p class="noindent">In ZOS, <code>Worker._correct_seqlens_qk </code>receives the CPU’s fixed <code>total_q</code>. If
+the current batch overlaps the previous one, it passes the remap and the previous
+sampler’s device confidence to the GPU length helper. Those device values belong to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>N</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn></mrow></math>, even
+though host post-processing has not yet published them. The kernel first makes cumulative
+rates:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.14.</b> Form prefix confidence from the previous device batch.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">26</span><span><span class="c1"># Phase 1: compute cumprod, reading confidence rates via remap (0.0 for fresh seqs)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">27</span><span><span class="k">with</span> <span class="n">T</span><span class="o">.</span><span class="n">Kernel</span><span class="p">(</span><span class="n">num_seqs</span><span class="p">,</span> <span class="n">threads</span><span class="o">=</span><span class="mi">128</span><span class="p">)</span> <span class="k">as</span> <span class="n">pid</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">28</span><span>    <span class="n">acc</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">29</span><span>    <span class="n">acc</span> <span class="o">=</span> <span class="mf">1.0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">30</span><span>    <span class="n">T</span><span class="o">.</span><span class="n">pdl_sync</span><span class="p">()</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">31</span><span>    <span class="n">prev_idx</span> <span class="o">=</span> <span class="n">remap</span><span class="p">[</span><span class="n">pid</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">32</span><span>    <span class="k">if</span> <span class="n">prev_idx</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">33</span><span>        <span class="n">acc</span> <span class="o">=</span> <span class="mf">0.0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">34</span><span>    <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">T</span><span class="o">.</span><span class="n">serial</span><span class="p">(</span><span class="n">nextn</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">35</span><span>        <span class="k">if</span> <span class="n">prev_idx</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">36</span><span>            <span class="n">acc</span> <span class="o">=</span> <span class="n">acc</span> <span class="o">*</span> <span class="n">prev_confidence_rates</span><span class="p">[</span><span class="n">prev_idx</span><span class="p">,</span> <span class="n">j</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">37</span><span>        <span class="n">cum_rates</span><span class="p">[</span><span class="n">pid</span><span class="p">,</span> <span class="n">j</span><span class="p">]</span> <span class="o">=</span> <span class="n">acc</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py#L26-L37">deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py</a> · lines 26–37</div></div>
+<p class="indent">   Each position then counts how many other positions outrank it. Equal values are ordered by
+flat index, combining request index and position:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.15.</b> Rank each draft position, including ties.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">58</span><span><span class="c1"># Higher rate wins; tie-break by flat index (lower index wins)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">59</span><span><span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">T</span><span class="o">.</span><span class="n">serial</span><span class="p">(</span><span class="n">nextn</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">60</span><span>    <span class="n">my_flat_idx</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">61</span><span>    <span class="n">my_flat_idx</span> <span class="o">=</span> <span class="n">pid</span> <span class="o">*</span> <span class="n">nextn</span> <span class="o">+</span> <span class="n">j</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">62</span><span>    <span class="n">beats</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_var</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">63</span><span>    <span class="n">beats</span> <span class="o">=</span> <span class="mi">0</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">64</span><span>    <span class="k">if</span> <span class="n">other_rate</span> <span class="o">&gt;</span> <span class="n">my_rates</span><span class="p">[</span><span class="n">j</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">65</span><span>        <span class="n">beats</span> <span class="o">=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">66</span><span>    <span class="k">if</span> <span class="n">other_rate</span> <span class="o">==</span> <span class="n">my_rates</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="ow">and</span> <span class="n">other_idx</span> <span class="o">&lt;</span> <span class="n">my_flat_idx</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">67</span><span>        <span class="n">beats</span> <span class="o">=</span> <span class="mi">1</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">68</span><span>    <span class="n">rank_reducer</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">+=</span> <span class="n">beats</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py#L58-L68">deepinfer/model_executor/layers/tilelang_ops/cuda/schedule_mtp_varlen.py</a> · lines 58–68</div></div>
+<p class="indent">   A position wins if this rank is smaller than <code>total_q - num_seqs</code>. The request’s query length
+becomes one plus its winning positions. The kernel does not rerun the time-model search. In lab
+18’s staircase case, the total remains six while the newer values change the allocation from
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>3</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>3</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math> to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-open" stretchy="false">[</mo><mn>2</mn><mo class="MathClass-punc" stretchy="false">,</mo><mn>4</mn><mo class="MathClass-close" stretchy="false">]</mo></mrow></math>. The
+six evaluated positions still fit the same graph bucket.
+</p><p class="indent">   The worker next corrects key lengths using the chosen query lengths and the previous
+accepted counts. It copies query lengths into pinned host memory and records <code>d2h_evt</code>. Forward
+uses the corrected device inputs. Before launching sampling, the worker waits for that copy and
+calls <code>update_metadata_for_sampling_zos</code>. This is chapter 6’s third metadata correction: the
+host’s initial lengths described a provisional division of work, and sampling must see the division
+that actually ran <span class="cite">[<a href="references.html#Xdeepinfer-confidence-allocation">66</a>, <a href="references.html#Xdeepinfer-worker">7</a>]</span>.
+                                                                                  
+                                                                                  
+</p><p class="indent">   Fresh rows need care. On the CPU, an empty rate vector is filled with ones if <code>has_draft </code>is
+true, and zeros otherwise. The predicate includes a request whose host processing is one step
+behind. On the GPU, an unmatched row (<code>remap=-1</code>) has zero cumulative confidence. But zero
+confidence does not force a query length of one: after all positive positions win, zero-valued
+positions can take the remaining slots. The scalar rank-count reference shows this with two
+surviving requests and one new row:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>GPU rank-count reference; remap=[0,-1,1]
+  total=7: q=[3, 1, 3]
+  total=8: q=[3, 2, 3]
+  CPU missing-rate fill=1, same total=7: q=[3, 3, 1]
+  Both conserve the budget; zero confidence can receive surplus slots.
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/18_verification_budget.txt">results/18_verification_budget.txt</a></div></div>
+<p class="indent">   The CPU comparison deliberately supplies ones for that new row to expose the difference
+between the two local rules. Both allocations conserve the total. It is not a trace proving that this
+particular combination of host history, placeholder drafts and pool-slot validity reaches the
+engine. Establishing that requires following admission and proposal ownership together. In
+particular, <code>_correct_seqlens_qk </code>skips correction if there is no overlap at all. We leave the
+mixed-batch reachability question open rather than calling the different fill values a budget
+bug.
+</p><p class="indent">   The README’s deterministic-sampling recipe requires variable-length verification to
+be disabled, alongside batch invariance and a fixed sequence seed. The acceptance
+RNG’s position-based indexing does not remove the runtime timings that influence the
+budget. Different measured timings could select different verification work; that is
+an inference about the restriction, developed with the other contracts in chapter 10
+<span class="cite">[<a href="references.html#Xdeepinfer-readme">1</a>]</span>.
+</p>
+<h3 class="sectionHead" id="reported-gains-and-confidence-error"><span class="titlemark">8.5   </span> <a id="x1-1280008.5"></a>Reported gains and confidence error</h3>
+
+<h4 class="subsectionHead" id="less-verification-can-help-or-hurt"><span class="titlemark">8.5.1   </span> <a id="x1-1290008.5.1"></a>Less verification can help or hurt</h4>
+<p class="noindent">The deployment Q&amp;A reports estimated throughput from EP64/DP64 benchmark data,
+comparing fixed-five verification with variable length. Lab 18 stores the six rows as sourced CSV
+data and recomputes the gains:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>DSpark: DeepSeek's reported throughput estimates, not lab timings
+  concurrency fixed dynamic gain
+           16  4891    4816  -1.5%
+           32  8964    9111  +1.6%
+           48 12032   12467  +3.6%
+           60 13730   14466  +5.4%
+           72 14962   15961  +6.7%
+           96 16817   18660 +11.0%
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/18_verification_budget.txt">results/18_verification_budget.txt</a></div></div>
+<p class="indent">   These are DeepSeek’s reported estimates, not timings from our experiment.
+At concurrency 16, average verified draft length falls from 5 to 4.44, while
+accepted length falls from 3.32 to 3.24; estimated throughput falls by about
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1.5</mn><mi>%</mi></mrow></math>. At 96,
+verified length falls to 3.24 and accepted length from 3.30 to 3.15, yet estimated throughput rises by
+about <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>11</mn><mi>%</mi></mrow></math>.
+At the reported operating point of roughly 60 requests per rank, the table gives
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>14466</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>13730</mn> <mo class="MathClass-bin" stretchy="false">−</mo> <mn>1</mn> <mo class="MathClass-rel" stretchy="false">≈</mo> <mn>5.4</mn><mi>%</mi></mrow></math>
+<span class="cite">[<a href="references.html#Xdeepinfer-qa">2</a>]</span>.
+</p><p class="indent">   The lower accepted length at 96 is compatible with greater useful throughput if the step cost
+falls enough. Conversely, dropping positions inside a cheap graph bucket may save little time
+while reducing output. Our synthetic curves explain those possibilities; they neither reproduce the
+production workload nor isolate the cause of its gains. The decision depends on both sides of
+                                                                                  
+                                                                                  
+chapter 2’s ratio: useful output and elapsed time. A higher acceptance rate by itself settles
+neither.
+</p>
+<h4 class="subsectionHead" id="what-the-confidence-metric-compares"><span class="titlemark">8.5.2   </span> <a id="x1-1300008.5.2"></a>What the confidence metric compares</h4>
+<p class="noindent">The engine records <code>avg_confidence_error</code>. Verification adds
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mo class="MathClass-rel" stretchy="false">|</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">confidence</mtext></mstyle><mo class="MathClass-bin" stretchy="false">−</mo><mstyle class="text"><mtext class="texttt" mathvariant="monospace">accept_probs</mtext></mstyle><mo class="MathClass-rel" stretchy="false">|</mo></mrow></math>
+for every row marked for verification, and the logger divides the accumulated error
+by the verification count. Rows after an earlier rejection can still contribute because
+the mask marks evaluated verification positions, not only the emitted prefix. This
+compares confidence with a probability-like value, rather than a realised zero-or-one result
+<span class="cite">[<a href="references.html#Xdeepinfer-confidence-metric">67</a>]</span>.
+</p><p class="indent">   There is a subtlety in that value. Even when a token was accepted, the CUDA kernel
+computes the full residual mass for the metric:
+</p>
+<div class="code-card source-code"><div class="listing-title"><b>Listing 8.16.</b> Derive the logged probability proxy from accumulated residual mass.</div><div class="code-tools"><span>PYTHON</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code><span class="code-line"><span aria-hidden="true" class="line-no">471</span><span><span class="k">if</span> <span class="n">accepted_s</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">472</span><span>    <span class="c1"># accept_probs still requires the full fixed-point residual mass.</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">473</span><span>    <span class="n">residual_mass</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">alloc_reducer</span><span class="p">((</span><span class="mi">1</span><span class="p">,),</span> <span class="n">sample_cfg</span><span class="o">.</span><span class="n">scale_dtype</span><span class="p">,</span> <span class="n">replication</span><span class="o">=</span><span class="s2">"all"</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">474</span><span>    <span class="n">T</span><span class="o">.</span><span class="n">fill</span><span class="p">(</span><span class="n">residual_mass</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">475</span><span>    <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">T</span><span class="o">.</span><span class="n">Parallel</span><span class="p">(</span><span class="n">SAMPLE_BD</span><span class="p">):</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">476</span><span>        <span class="n">residual_mass</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+=</span> <span class="n">sample_acc_frag</span><span class="p">[</span><span class="n">j</span><span class="p">]</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">477</span><span>    <span class="n">T</span><span class="o">.</span><span class="n">finalize_reducer</span><span class="p">(</span><span class="n">residual_mass</span><span class="p">)</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">478</span><span>    <span class="k">if</span> <span class="n">T</span><span class="o">.</span><span class="n">get_thread_binding</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span></span></span>
+<span class="code-line"><span aria-hidden="true" class="line-no">479</span><span>        <span class="n">accept_probs</span><span class="p">[</span><span class="n">row</span><span class="p">]</span> <span class="o">=</span> <span class="n">T</span><span class="o">.</span><span class="n">max</span><span class="p">(</span><span class="mf">1.0</span> <span class="o">-</span> <span class="n">T</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">residual_mass</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">T</span><span class="o">.</span><span class="n">float</span><span class="p">)</span> <span class="o">/</span> <span class="n">sample_cfg</span><span class="o">.</span><span class="n">scale</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span></span></span>
+</code></pre><div class="code-source">DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/774ce244b87cc0eb8d4b94ab9f5de2ab22049f01/deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py#L471-L479">deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py</a> · lines 471–479</div></div>
+<p class="indent">   This is the <em>penalised, fixed-point </em>residual, not the standard residual. Ignoring numerical
+rounding, the standard test’s acceptance probability, averaged over proposals at a fixed prefix, is
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>β</mi> <mo class="MathClass-rel" stretchy="false">=</mo><msub><mrow> <mi class="MathClass-op">∑</mi><mo> ⁡</mo>
+</mrow><mrow><mi>x</mi></mrow></msub><mtext class="qopname"> min</mtext><mo> ⁡ </mo><mo class="MathClass-open" stretchy="false">(</mo><mi>P</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-punc" stretchy="false">,</mo><mi>Q</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo><mi mathvariant="normal">Δ</mi></mrow></math>. The logged proxy
+instead uses <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo><msub><mrow><mi class="MathClass-op">∑</mi><mo> ⁡</mo>
+</mrow><mrow><mi>x</mi></mrow></msub><mi>r</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>1</mn> <mo class="MathClass-bin" stretchy="false">−</mo><mi mathvariant="normal">Δ</mi> <mo class="MathClass-bin" stretchy="false">−</mo> <mi>D</mi></mrow></math>,
+with a clamp at zero. Thus it can be smaller by up to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>𝜀</mi></mrow></math> in
+ideal arithmetic. For the exaggerated lab penalty, the difference is visible:
+</p>
+<div class="code-card console"><div class="code-tools"><span>OUTPUT</span><button aria-label="Copy code" class="copy-code" type="button">Copy</button></div><pre><code>Ideal arithmetic, before fixed-point rounding:
+  mean acceptance of standard test: 5/6
+  1 - penalised residual mass:      47/60
+  difference:                      1/20
+</code></pre><div class="code-source">Saved output · <a href="https://github.com/jzstark/inside-deepinfer-code/blob/main/results/17_verification.txt">results/17_verification.txt</a></div></div>
+<p class="indent">   Neither quantity is the acceptance chance
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>a</mi><mo class="MathClass-open" stretchy="false">(</mo><mi>x</mi><mo class="MathClass-close" stretchy="false">)</mo></mrow></math> of a
+particular token already drawn, and neither is that token’s realised acceptance outcome.
+Fixed-point rounding adds another distinction in the implementation. Calling the metric an exact
+conditional acceptance probability would lose these boundaries. Calling it the confidence error
+reported by this engine preserves the useful question: how well does the head predict the quantity
+the engine actually logs?
+</p><p class="indent">   Verification spends work on possible future tokens. The next chapter reduces prefill work by
+reconstructing only a suffix of some model state. Its guarantee is different: the sampling residual’s
+probability bound does not bound errors in reconstructed hidden states. We must first ask which
+dependencies the shortened computation preserves.
+</p>
+<h3 class="sectionHead" id="experiments-to-try-next7"><span class="titlemark">8.6   </span> <a id="x1-1310008.6"></a>Experiments to try next</h3>
+<ol class="enumerate1">
+<li class="enumerate" id="x1-131002x1">In lab 17, use <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>α</mi> <mo class="MathClass-rel" stretchy="false">=</mo> <mn>99</mn><mo class="MathClass-bin" stretchy="false">∕</mo><mn>100</mn></mrow></math>.
+                                                                                  
+                                                                                  
+     Predict the direction of each probability change before running. Check the bound
+     and explain why the zero-rejection case needs no normalisation of a residual.
+     </li>
+<li class="enumerate" id="x1-131004x2">For one token in the opening example, calculate its acceptance chance after it is
+     proposed, the mean acceptance over all proposals, and the logged ideal-arithmetic
+     proxy. Which of these could equal zero or one in a single run?
+     </li>
+<li class="enumerate" id="x1-131006x3">In  lab  18,  raise  the  forward  slope  while  keeping  the  startup  curve  fixed.  Predict
+     the winning total. Explain why the slope multiplies the graph size rather than the
+     unpadded position count.
+     </li>
+<li class="enumerate" id="x1-131008x4">Replace the newer history with the older one. Which values in the saved output
+     change? Explain why the total-budget search does not need to change.
+     </li>
+<li class="enumerate" id="x1-131010x5">Give the scalar GPU allocator more budget than there are positive-rate positions.
+     Predict which zero-valued position wins first. Then identify the engine conditions that
+     would need checking before treating that example as a reachable request trace.
+     </li>
+<li class="enumerate" id="x1-131012x6">Trace one DFlash proposal from its pool write through verification to final output.
+     At each boundary identify the token IDs, stored distribution, confidence round and
+     completion event. Separate a demonstrated numerical guarantee from an inference
+     about adaptive selection or determinism.</li></ol>
+</article><nav class="page-turn" aria-label="Book pages"><a href="chapter-07.html"><small>PREVIOUS</small>← Put experts on several devices</a><a class="next" href="chapter-09.html"><small>NEXT</small>Reconstruct state approximately →</a></nav>
+<footer class="page-footer">© 2026 Jianxin Zhao. Book text and original illustrations:
+<a rel="license" href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.<br>
+Noncommercial sharing and adaptations are welcome under the licence’s terms. Code has separate licences.<br>
+<a href="notice.html">Copyright and edition</a> · <a href="COPYRIGHT.txt">Licence details</a></footer></main>
+<aside class="page-toc"><div class="nav-label">ON THIS PAGE</div><nav aria-label="On this page"><a class="" href="#accept-or-correct">8.1 Accept or correct</a><a class="" href="#what-deepinfer-verifies">8.2 What DeepInfer verifies</a><a class="toc-sub" href="#the-acceptance-test-is-standard">8.2.1 The acceptance test is standard</a><a class="toc-sub" href="#the-correction-deliberately-leaves-a-small-bias">8.2.2 The correction deliberately leaves a small bias</a><a class="toc-sub" href="#only-a-surviving-prefix-is-published">8.2.3 Only a surviving prefix is published</a><a class="" href="#how-many-positions-are-worth-the-work">8.3 How many positions are worth the work?</a><a class="toc-sub" href="#a-search-over-totals-then-a-second-allocation">8.3.1 A search over totals, then a second allocation</a><a class="toc-sub" href="#the-engine-supplies-the-time-model">8.3.2 The engine supplies the time model</a><a class="toc-sub" href="#fixed-length-is-the-default">8.3.3 Fixed length is the default</a><a class="" href="#which-round-supplies-the-confidence">8.4 Which round supplies the confidence?</a><a class="toc-sub" href="#produce-once-store-the-distribution-verify-later">8.4.1 Produce once, store the distribution, verify later</a><a class="toc-sub" href="#choose-a-total-with-older-information">8.4.2 Choose a total with older information</a><a class="toc-sub" href="#reallocate-on-the-device-without-changing-the-total">8.4.3 Reallocate on the device without changing the total</a><a class="" href="#reported-gains-and-confidence-error">8.5 Reported gains and confidence error</a><a class="toc-sub" href="#less-verification-can-help-or-hurt">8.5.1 Less verification can help or hurt</a><a class="toc-sub" href="#what-the-confidence-metric-compares">8.5.2 What the confidence metric compares</a><a class="" href="#experiments-to-try-next7">8.6 Experiments to try next</a></nav><a class="back-top" href="#reading">Back to top ↑</a></aside></div></body></html>
